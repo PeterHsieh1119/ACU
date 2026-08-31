@@ -1,5 +1,7 @@
 # ACU — 針灸 × PNF 3D 輔助工具
 
+### 🔗 線上直接打開：**[https://peterhsieh1119.github.io/ACU/](https://peterhsieh1119.github.io/ACU/)**
+
 純靜態網頁的 3D 針灸／PNF 學習輔助：在同一個解剖模型上，把 **經絡穴位 ↔ 肌肉 ↔ PNF 對角模式** 三層資料接在一起。
 
 ## 功能
@@ -12,7 +14,7 @@
 
 ## 使用
 
-線上開啟（GitHub Pages）或本地執行：
+點上方連結（GitHub Pages）直接使用，或本地執行：
 
 ```bash
 python -m http.server 8000
