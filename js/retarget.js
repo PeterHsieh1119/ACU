@@ -101,7 +101,8 @@ export function makeRetarget(landmarks, skin, lift = 0.005) {
   const T = targetChains(landmarks);
   const keys = Object.keys(SOURCE);
   const intersect = makeSurfaceRay(skin);
-  const FAR = 0.8;
+  // 由體軸到體表最遠約 0.17 m（軀幹側面）；設 0.28 m 上限，射線就不會穿到身體另一側
+  const FAR = 0.28;
 
   const _p = new THREE.Vector3(), _ab = new THREE.Vector3(), _ap = new THREE.Vector3();
   const _q = new THREE.Vector3(), _off = new THREE.Vector3(), _dir = new THREE.Vector3();
@@ -111,17 +112,23 @@ export function makeRetarget(landmarks, skin, lift = 0.005) {
 
   /**
    * @param {number[]} pos 來源座標（+x 側或正中線）
-   * @param {string} [level] 椎體代號（'T3'、'L2'、'S2'…），有給就用真實棘突高度覆蓋
-   * @param {number} [maxShift] 體表交點離「預期位置」超過這個距離就不吸附，保留映射後的座標。
-   *                            穴位本來就在皮膚上，用預設的 Infinity；經絡走行的空中補間點才需要限制。
+   * @param {object} [opts]
+   *   level    椎體代號（'T3'、'L2'、'S2'…），有給就用真實棘突高度定位
+   *   lat      旁開幾寸（背部穴位；沒給就由來源座標推算）
+   *   maxShift 體表交點離「預期位置」超過這個距離就不吸附，保留映射後的座標。
+   *            穴位本來就在皮膚上，用預設的 Infinity；經絡走行的空中補間點才需要限制。
+   *   allow    限定可用的體軸。胸腹背的穴位在幾何上常常離手臂體軸更近（例如淵腋、
+   *            天池、大包），不限定就會被判給手臂、射線往內穿過整個身體打到對側。
    */
-  return function retarget(pos, level, maxShift = Infinity) {
+  return function retarget(pos, opts = {}) {
+    const { level = null, lat = null, maxShift = Infinity, allow = null } = opts;
     _p.set(pos[0], pos[1], pos[2]);
 
     // 1. 找出最近的來源體軸段
     let bestD = Infinity, bestKey = null, bestSeg = 0, bestT = 0;
-    for (const key of keys) {
+    for (const key of (allow && allow.length ? allow : keys)) {
       const chain = SOURCE[key];
+      if (!chain) continue;
       for (let i = 0; i < chain.length - 1; i++) {
         const a = chain[i];
         _ab.subVectors(chain[i + 1], a);
@@ -155,7 +162,7 @@ export function makeRetarget(landmarks, skin, lift = 0.005) {
     //    所以直接用真實棘突高度 + 真實骨度分寸算出側方距離，再往後打到背部皮膚。
     const lv = level && levelPosition(landmarks, level);
     if (lv) {
-      const cun = Math.abs(pos[0]) / SOURCE_CUN_BACK;
+      const cun = lat != null ? lat : Math.abs(pos[0]) / SOURCE_CUN_BACK;
       _base.set(cun * (landmarks.cunBack || 0.021), lv.y, 0.02);
       _dir.set(0, 0, -1);
     }

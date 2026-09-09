@@ -96,7 +96,7 @@ if (anatomy) {
   skinMat.userData.depthPass = depthPass;
   const retarget = makeRetarget(anatomy.landmarks, anatomy.skin.geometry, 0.005);
   const nearestAxis = makeAxisPoint(anatomy.landmarks);
-  placePoint = (pos, level, maxShift) => retarget(pos, level, maxShift === undefined ? Infinity : maxShift);
+  placePoint = (pos, opts = {}) => retarget(pos, opts);
   axisPoint = nearestAxis;
 } else {
   const built = buildBody();
@@ -104,18 +104,26 @@ if (anatomy) {
   skinMat = built.material;
   const snap = makeSnapper(built.collision, 0.005);
   const snapLoose = makeSnapper(built.collision, 0.007, 0.20);
-  placePoint = (pos, level, maxShift) => {
-    if (maxShift === 0) return { p: pos.slice(), n: [0, 0, 1] };   // 只做映射、不吸附體表
-    const p = (maxShift ? snapLoose : snap)(pos);
+  placePoint = (pos, opts = {}) => {
+    if (opts.maxShift === 0) return { p: pos.slice(), n: [0, 0, 1] };   // 只做映射、不吸附體表
+    const p = (opts.maxShift ? snapLoose : snap)(pos);
     const n = new THREE.Vector3(...p).sub(bodyAxisPoint(new THREE.Vector3(...p))).normalize();
     return { p, n: [n.x, n.y, n.z] };
   };
   axisPoint = bodyAxisPoint;
 }
 
+// 依部位限定體軸，避免胸腹穴位被判給手臂體軸而投影到身體另一側
+const CHAINS_BY_REGION = {
+  head: ['trunk'], neck: ['trunk'], chest: ['trunk'], abdomen: ['trunk'], back: ['trunk'],
+  upper: ['arm'], lower: ['leg', 'foot'],
+};
+
 // 穴位落到體表；bilateral 的另一側直接鏡射（模型左右對稱）
 const snapped = new Map();          // pointId -> { p:[x,y,z], n:[x,y,z] }（+x 側）
-for (const pt of POINTS) snapped.set(pt.id, placePoint(pt.pos, pt.level));
+for (const pt of POINTS) {
+  snapped.set(pt.id, placePoint(pt.pos, { level: pt.level, lat: pt.lat, allow: CHAINS_BY_REGION[pt.region] }));
+}
 
 const pointById = Object.fromEntries(POINTS.map(p => [p.id, p]));
 const patternById = Object.fromEntries(PNF_PATTERNS.map(p => [p.id, p]));
@@ -140,10 +148,10 @@ function surfacePolyline(strand) {
     const a = anchors[i], b = anchors[i + 1];
     push(a);
     const d = Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]);
-    const n = Math.min(10, Math.floor(d / 0.045));
+    const n = Math.min(14, Math.floor(d / 0.035));
     for (let k = 1; k <= n; k++) {
       const t = k / (n + 1);
-      push(placePoint([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t], null, 0.05).p);
+      push(placePoint([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t], { maxShift: 0.09 }).p);
     }
   }
   push(anchors[anchors.length - 1]);
@@ -238,12 +246,14 @@ for (const [id, mu] of Object.entries(MUSCLES)) {
     transparent: true, opacity: mu.deep ? 0.55 : 0.92, depthWrite: false,
   });
   const rec = anatomy && anatomy.muscles.get(id);
-  // 來源解剖資料沒有的肌肉仍用示意管狀幾何，但走行點一樣要搬到真實骨架上，
-  // 否則會浮在真實體表外面（maxShift 0 = 只做骨架映射，不吸附體表）
-  const path = anatomy ? mu.path.map(p => placePoint(p, null, 0).p) : mu.path;
+  // 來源解剖資料沒有的肌肉仍用示意幾何（扇形肌肉可寫成多股 paths），
+  // 但走行點一樣要搬到真實骨架上，否則會浮在真實體表外面
+  //（maxShift 0 = 只做骨架映射，不吸附體表）
+  const strands = (mu.paths || [mu.path])
+    .map(pts => anatomy ? pts.map(p => placePoint(p, { maxShift: 0 }).p) : pts);
   const geometries = rec
     ? (rec.mirror ? [rec.geometry, mirrorGeometry(rec.geometry)] : [rec.geometry])
-    : (mu.midline ? [path] : [path, path.map(p => [-p[0], p[1], p[2]])])
+    : strands.flatMap(pts => mu.midline ? [pts] : [pts, pts.map(p => [-p[0], p[1], p[2]])])
         .map(pts => tube(pts, { r: mu.r, radial: 10 }));
   const meshes = [];
   for (const geo of geometries) {
@@ -498,10 +508,10 @@ function muscleCenter(id) {
     const [a, b] = rec.bounds;
     return new THREE.Vector3((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2);
   }
-  const path = MUSCLES[id].path;
+  const pts = (MUSCLES[id].paths || [MUSCLES[id].path]).flat();
   const v = new THREE.Vector3();
-  for (const p of path) v.add(new THREE.Vector3(...p));
-  return v.multiplyScalar(1 / path.length);
+  for (const p of pts) v.add(new THREE.Vector3(...p));
+  return v.multiplyScalar(1 / pts.length);
 }
 
 // ============================================================
@@ -919,7 +929,19 @@ function updateLabels() {
     });
   }
   wanted.sort((a, b) => (b.sel - a.sel) || (a.z - b.z));
-  const shown = wanted.slice(0, 70);
+
+  // 避讓重疊：由近到遠依序擺放，和已擺好的標籤重疊就跳過。
+  // 全部畫出來會糊成一片，反而看不到任何一個穴名。
+  const placed = [];
+  const shown = [];
+  for (const d of wanted) {
+    const w = d.text.length * 12 + 12, h = 17;
+    const x0 = d.x - w / 2, y0 = d.y - h * 1.4, x1 = x0 + w, y1 = y0 + h;
+    if (placed.some(r => x0 < r[2] && x1 > r[0] && y0 < r[3] && y1 > r[1])) continue;
+    placed.push([x0, y0, x1, y1]);
+    shown.push(d);
+    if (shown.length >= 70) break;
+  }
 
   while (labelPool.length < shown.length) {
     const el = document.createElement('div');

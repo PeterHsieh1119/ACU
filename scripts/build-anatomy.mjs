@@ -326,7 +326,7 @@ function centroid(names) {
 }
 
 const VERTEBRAE = {
-  C1: 'first cervical vertebra', C2: 'second cervical vertebra', C3: 'third cervical vertebra',
+  C1: 'atlas', C2: 'axis', C3: 'third cervical vertebra',
   C4: 'fourth cervical vertebra', C5: 'fifth cervical vertebra', C6: 'sixth cervical vertebra',
   C7: 'seventh cervical vertebra',
   T1: 'first thoracic vertebra', T2: 'second thoracic vertebra', T3: 'third thoracic vertebra',

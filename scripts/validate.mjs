@@ -1,0 +1,118 @@
+#!/usr/bin/env node
+// 資料一致性檢查：CI 或改完資料後跑一次
+//   node scripts/validate.mjs
+
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { POINTS, ROUTES, MERIDIANS, REGIONS } from '../data/acupoints.js';
+import { MUSCLES, MUSCLE_GROUPS } from '../data/muscles.js';
+import { PNF_PATTERNS, PNF_REGIONS } from '../data/pnf.js';
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const problems = [];
+const fail = m => problems.push(m);
+const ok = m => console.log('  ✓', m);
+
+// ---------- 穴位 ----------
+const STANDARD = { LU: 11, LI: 20, ST: 45, SP: 21, HT: 9, SI: 19, BL: 67, KI: 27, PC: 9, TE: 23, GB: 44, LR: 14, REN: 24, DU: 28 };
+const ids = new Set();
+for (const p of POINTS) {
+  if (ids.has(p.id)) fail(`穴位 id 重複：${p.id}`);
+  ids.add(p.id);
+  if (!MERIDIANS[p.meridian]) fail(`${p.id} 的經絡不存在：${p.meridian}`);
+  if (!REGIONS[p.region]) fail(`${p.id} 的部位不存在：${p.region}`);
+  if (!Array.isArray(p.pos) || p.pos.length !== 3 || p.pos.some(v => typeof v !== 'number')) fail(`${p.id} 座標格式錯誤`);
+  if (p.pos[0] < 0) fail(`${p.id} 的 x 為負；雙側穴位一律定義在 +x 側`);
+  if (p.pos[1] < 0 || p.pos[1] > 1.8) fail(`${p.id} 的 y 超出人體範圍：${p.pos[1]}`);
+  if (!p.bilateral && Math.abs(p.pos[0]) > 1e-6) fail(`${p.id} 標為非雙側卻不在正中線`);
+  for (const m of p.muscles) if (!MUSCLES[m]) fail(`${p.id} 參照到不存在的肌肉：${m}`);
+  for (const f of ['loc', 'ind', 'depth']) if (!p[f]) fail(`${p.id} 缺少 ${f}`);
+  if (p.lat !== undefined && !p.level) fail(`${p.id} 有 lat 卻沒有 level`);
+}
+let counts = true;
+for (const [k, n] of Object.entries(STANDARD)) {
+  const c = POINTS.filter(p => p.meridian === k).length;
+  if (c !== n) { counts = false; fail(`${MERIDIANS[k].name} 有 ${c} 穴，標準為 ${n} 穴`); }
+}
+if (counts) ok(`十四經 361 穴齊全，另有經外奇穴 ${POINTS.filter(p => p.meridian === 'EX').length} 穴`);
+
+// ---------- 經絡走行 ----------
+for (const [k, strands] of Object.entries(ROUTES)) {
+  if (!MERIDIANS[k]) fail(`ROUTES 有未知經絡：${k}`);
+  for (const strand of strands) {
+    for (const e of strand) {
+      if (Array.isArray(e)) {
+        if (e.length !== 3) fail(`${k} 走行補間座標格式錯誤`);
+      } else if (!ids.has(e)) fail(`${k} 走行參照到不存在的穴位：${e}`);
+    }
+  }
+}
+for (const k of Object.keys(MERIDIANS)) if (!(k in ROUTES)) fail(`ROUTES 缺少經絡：${k}`);
+ok('經絡走行參照正確');
+
+// ---------- 肌肉 ----------
+for (const [id, mu] of Object.entries(MUSCLES)) {
+  if (!MUSCLE_GROUPS[mu.group]) fail(`肌肉 ${id} 的分組不存在：${mu.group}`);
+  const strands = mu.paths || (mu.path ? [mu.path] : []);
+  if (!strands.length) fail(`肌肉 ${id} 缺少 path/paths`);
+  for (const st of strands) {
+    if (st.length < 2) fail(`肌肉 ${id} 的走行點少於 2 個`);
+    for (const pt of st) if (!Array.isArray(pt) || pt.length !== 3) fail(`肌肉 ${id} 走行點格式錯誤`);
+  }
+  for (const f of ['name', 'latin', 'origin', 'insertion', 'action', 'nerve']) {
+    if (!mu[f]) fail(`肌肉 ${id} 缺少 ${f}`);
+  }
+}
+ok(`肌肉 ${Object.keys(MUSCLES).length} 條資料完整`);
+
+// ---------- PNF ----------
+const patIds = new Set(PNF_PATTERNS.map(p => p.id));
+for (const pat of PNF_PATTERNS) {
+  if (!PNF_REGIONS[pat.regionKey]) fail(`PNF ${pat.id} 的分區不存在：${pat.regionKey}`);
+  if (pat.pair && !patIds.has(pat.pair)) fail(`PNF ${pat.id} 的拮抗模式不存在：${pat.pair}`);
+  for (const m of pat.muscles) if (!MUSCLES[m]) fail(`PNF ${pat.id} 參照到不存在的肌肉：${m}`);
+  if (!pat.muscles.length) fail(`PNF ${pat.id} 沒有肌肉成分`);
+}
+ok(`PNF ${PNF_PATTERNS.length} 個模式資料完整`);
+
+// ---------- 三層連結 ----------
+const orphan = Object.keys(MUSCLES).filter(id =>
+  !POINTS.some(p => p.muscles.includes(id)) && !PNF_PATTERNS.some(p => p.muscles.includes(id)));
+if (orphan.length) console.log('  · 沒有被任何穴位或 PNF 模式引用的肌肉：', orphan.join(', '));
+
+// ---------- 解剖資產 ----------
+const anatomyDir = path.join(ROOT, 'data/anatomy');
+if (fs.existsSync(path.join(anatomyDir, 'manifest.json'))) {
+  const man = JSON.parse(fs.readFileSync(path.join(anatomyDir, 'manifest.json'), 'utf8'));
+  for (const [g, grp] of Object.entries(man.groups)) {
+    const f = path.join(anatomyDir, grp.file);
+    if (!fs.existsSync(f)) fail(`解剖資產缺少檔案：${grp.file}`);
+    else if (fs.statSync(f).size !== grp.gzipBytes) fail(`${grp.file} 大小與 manifest 不符`);
+  }
+  const real = new Set(man.groups.muscles.parts.map(p => p.key));
+  const unknown = [...real].filter(k => !MUSCLES[k]);
+  if (unknown.length) fail(`解剖資產有 data/muscles.js 沒有的肌肉 id：${unknown.join(', ')}`);
+  const approx = Object.keys(MUSCLES).filter(k => !real.has(k));
+  ok(`解剖資產：真實網格 ${real.size} 條、示意幾何 ${approx.length} 條（${approx.join('、')}）`);
+  for (const k of ['vertex', 'shoulder', 'elbow', 'wrist', 'hip', 'knee', 'ankle', 'cunBack', 'spinous']) {
+    if (man.landmarks[k] === undefined) fail(`manifest 缺少 landmark：${k}`);
+  }
+  const need = ['C7', 'T1', 'T3', 'T7', 'T12', 'L2', 'L5'];
+  for (const v of need) if (!man.landmarks.spinous[v]) fail(`manifest 缺少椎體 landmark：${v}`);
+  const levels = new Set(POINTS.filter(p => p.level).map(p => p.level));
+  for (const lv of levels) {
+    if (!man.landmarks.spinous[lv] && !/^S[1-4]$/.test(lv)) fail(`穴位用到的椎體 ${lv} 在 manifest 找不到`);
+  }
+  ok('骨架 landmark 齊全');
+} else {
+  console.log('  · 找不到 data/anatomy/manifest.json，略過解剖資產檢查');
+}
+
+console.log('');
+if (problems.length) {
+  console.error(`✗ 發現 ${problems.length} 個問題：`);
+  for (const p of problems) console.error('   -', p);
+  process.exit(1);
+}
+console.log('✓ 全部檢查通過');
