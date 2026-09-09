@@ -1,0 +1,14 @@
+{
+  "name": "acu",
+  "version": "1.0.0",
+  "private": true,
+  "description": "針灸 × PNF 3D 輔助工具（純靜態網頁，執行時不需要建置）",
+  "license": "MIT",
+  "scripts": {
+    "serve": "python3 -m http.server 8000",
+    "build:anatomy": "node scripts/build-anatomy.mjs"
+  },
+  "devDependencies": {
+    "meshoptimizer": "^0.25.0"
+  }
+}

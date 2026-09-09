@@ -4,6 +4,8 @@ import { MERIDIANS, REGIONS, POINTS, ROUTES } from '../data/acupoints.js';
 import { MUSCLES, MUSCLE_GROUPS } from '../data/muscles.js';
 import { PNF_PATTERNS, PNF_REGIONS } from '../data/pnf.js';
 import { buildBody, makeSnapper, bodyAxisPoint } from './body.js';
+import { loadAnatomy, mirrorGeometry } from './anatomy.js';
+import { makeRetarget, makeAxisPoint } from './retarget.js';
 import { tube } from './geom.js';
 
 const $ = id => document.getElementById(id);
@@ -61,24 +63,67 @@ function resize() {
 new ResizeObserver(resize).observe(container);
 
 // ============================================================
-// 人體 + 體表吸附
+// 人體：優先使用真實解剖資料，載入失敗才退回內建示意模型
 // ============================================================
-const { group: bodyGroup, material: skinMat, collision } = buildBody();
-scene.add(bodyGroup);
-const snap = makeSnapper(collision, 0.005);
-// 經絡線的補間點允許被推得遠一點，這樣穿過身體的直線段會被拉回體表
-const snapLoose = makeSnapper(collision, 0.007, 0.20);
+let anatomy = null;
+try {
+  anatomy = await loadAnatomy();
+} catch (err) {
+  console.warn('[ACU] 解剖資料載入失敗，改用內建示意模型：', err.message);
+}
 
-// 穴位座標吸附到體表；bilateral 的另一側各自吸附（模型左右對稱，結果也對稱）
-const snapped = new Map();          // pointId -> [x,y,z]（+x 側）
-for (const pt of POINTS) snapped.set(pt.id, snap(pt.pos));
+const bodyGroup = new THREE.Group();
+scene.add(bodyGroup);
+
+let skinMat, placePoint, axisPoint;
+
+if (anatomy) {
+  skinMat = new THREE.MeshStandardMaterial({
+    color: 0xdcbaa2, roughness: 0.74, metalness: 0.02,
+    transparent: true, opacity: 0.42, depthWrite: false, side: THREE.FrontSide,
+  });
+  // 深度預繪：真實體表在腋下、指縫、胯下等處會有多層前向面重疊，
+  // 半透明直接畫會重複混色而出現斑駁。先只寫深度不上色，再用單層著色。
+  // 繪製順序：骨骼(0) → 肌肉(1) → 體表深度(1.5) → 體表(2) → 經絡線(3) → 穴位(4)
+  const depthPass = new THREE.Mesh(anatomy.skin.geometry, new THREE.MeshBasicMaterial({
+    colorWrite: false, depthWrite: true, transparent: true, side: THREE.FrontSide,
+  }));
+  depthPass.renderOrder = 1.5;
+  bodyGroup.add(depthPass);
+  const skin = new THREE.Mesh(anatomy.skin.geometry, skinMat);
+  skin.renderOrder = 2;
+  bodyGroup.add(skin);
+  skinMat.userData.depthPass = depthPass;
+  const retarget = makeRetarget(anatomy.landmarks, anatomy.skin.geometry, 0.005);
+  const nearestAxis = makeAxisPoint(anatomy.landmarks);
+  placePoint = (pos, level, maxShift) => retarget(pos, level, maxShift === undefined ? Infinity : maxShift);
+  axisPoint = nearestAxis;
+} else {
+  const built = buildBody();
+  bodyGroup.add(built.group);
+  skinMat = built.material;
+  const snap = makeSnapper(built.collision, 0.005);
+  const snapLoose = makeSnapper(built.collision, 0.007, 0.20);
+  placePoint = (pos, level, maxShift) => {
+    if (maxShift === 0) return { p: pos.slice(), n: [0, 0, 1] };   // 只做映射、不吸附體表
+    const p = (maxShift ? snapLoose : snap)(pos);
+    const n = new THREE.Vector3(...p).sub(bodyAxisPoint(new THREE.Vector3(...p))).normalize();
+    return { p, n: [n.x, n.y, n.z] };
+  };
+  axisPoint = bodyAxisPoint;
+}
+
+// 穴位落到體表；bilateral 的另一側直接鏡射（模型左右對稱）
+const snapped = new Map();          // pointId -> { p:[x,y,z], n:[x,y,z] }（+x 側）
+for (const pt of POINTS) snapped.set(pt.id, placePoint(pt.pos, pt.level));
 
 const pointById = Object.fromEntries(POINTS.map(p => [p.id, p]));
 const patternById = Object.fromEntries(PNF_PATTERNS.map(p => [p.id, p]));
 
 function resolveRoutePoint(entry) {
-  if (Array.isArray(entry)) return snap(entry);
-  return snapped.get(entry) || pointById[entry].pos;
+  if (Array.isArray(entry)) return placePoint(entry).p;
+  const s = snapped.get(entry);
+  return s ? s.p : pointById[entry].pos;
 }
 
 // 兩個穴位之間如果距離較遠，直接連線會從身體內部穿過去。
@@ -98,7 +143,7 @@ function surfacePolyline(strand) {
     const n = Math.min(10, Math.floor(d / 0.045));
     for (let k = 1; k <= n; k++) {
       const t = k / (n + 1);
-      push(snapLoose([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]));
+      push(placePoint([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t], null, 0.05).p);
     }
   }
   push(anchors[anchors.length - 1]);
@@ -137,12 +182,13 @@ const R_BASE = 0.0072, R_REL = 0.0105, R_SEL = 0.0155;
 const instances = [];   // { pointId, pos, outward }
 for (const pt of POINTS) {
   const base = snapped.get(pt.id);
-  const list = (pt.bilateral && Math.abs(base[0]) > 1e-4) ? [base, [-base[0], base[1], base[2]]] : [base];
-  for (const pos of list) {
-    const v = new THREE.Vector3(...pos);
-    const outward = v.clone().sub(bodyAxisPoint(v)).normalize();
+  const sides = (pt.bilateral && Math.abs(base.p[0]) > 1e-4)
+    ? [[base.p, base.n], [[-base.p[0], base.p[1], base.p[2]], [-base.n[0], base.n[1], base.n[2]]]]
+    : [[base.p, base.n]];
+  for (const [pos, nrm] of sides) {
+    const outward = new THREE.Vector3(...nrm);
     if (!isFinite(outward.x) || outward.lengthSq() < 0.5) outward.set(0, 0, 1);
-    instances.push({ pointId: pt.id, pos, outward });
+    instances.push({ pointId: pt.id, pos, outward: outward.normalize() });
   }
 }
 const instIndexByPoint = new Map();
@@ -191,17 +237,24 @@ for (const [id, mu] of Object.entries(MUSCLES)) {
     color: 0xff5a52, emissive: 0x3d0f0f, roughness: 0.55, metalness: 0.0,
     transparent: true, opacity: mu.deep ? 0.55 : 0.92, depthWrite: false,
   });
+  const rec = anatomy && anatomy.muscles.get(id);
+  // 來源解剖資料沒有的肌肉仍用示意管狀幾何，但走行點一樣要搬到真實骨架上，
+  // 否則會浮在真實體表外面（maxShift 0 = 只做骨架映射，不吸附體表）
+  const path = anatomy ? mu.path.map(p => placePoint(p, null, 0).p) : mu.path;
+  const geometries = rec
+    ? (rec.mirror ? [rec.geometry, mirrorGeometry(rec.geometry)] : [rec.geometry])
+    : (mu.midline ? [path] : [path, path.map(p => [-p[0], p[1], p[2]])])
+        .map(pts => tube(pts, { r: mu.r, radial: 10 }));
   const meshes = [];
-  const sides = mu.midline ? [mu.path] : [mu.path, mu.path.map(p => [-p[0], p[1], p[2]])];
-  for (const path of sides) {
-    const mesh = new THREE.Mesh(tube(path, { r: mu.r, radial: 10 }), mat);
+  for (const geo of geometries) {
+    const mesh = new THREE.Mesh(geo, mat);
     mesh.visible = false;
     mesh.userData.muscleId = id;
     mesh.renderOrder = 1;
     muscleGroup.add(mesh);
     meshes.push(mesh);
   }
-  muscleMeshes[id] = { meshes, mat, deep: !!mu.deep };
+  muscleMeshes[id] = { meshes, mat, deep: !!mu.deep, real: !!rec, bounds: rec ? rec.bounds : null };
 }
 
 const MUS_BASE = 0xff5a52, MUS_HL = 0xffb057, MUS_SEL = 0xffe08a;
@@ -367,7 +420,9 @@ function showMuscleInfo(id) {
       <dt>其上／鄰近穴位</dt><dd>${ptTags(pointsOfMuscle(id))}</dd>
       <dt>參與的 PNF 模式</dt><dd>${pnfTags(patternsOfMuscle(id))}</dd>
     </dl>
-    <div class="warn">肌肉幾何為簡化示意（起止線＋梭形肌腹），不代表真實斷面形態。</div>`;
+    <div class="warn">${muscleMeshes[id] && muscleMeshes[id].real
+      ? '幾何取自 BodyParts3D 解剖模型（CC BY 4.0），為教學用簡化網格。'
+      : '來源解剖資料未包含此肌肉，此處以簡化示意幾何（起止線＋梭形肌腹）表示。'}</div>`;
   infoEl.classList.add('show');
   infoEl.scrollTop = 0;
   bindInfoTags();
@@ -438,6 +493,11 @@ function selectPattern(id, opts = {}) {
 }
 
 function muscleCenter(id) {
+  const rec = muscleMeshes[id];
+  if (rec && rec.bounds) {
+    const [a, b] = rec.bounds;
+    return new THREE.Vector3((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2);
+  }
   const path = MUSCLES[id].path;
   const v = new THREE.Vector3();
   for (const p of path) v.add(new THREE.Vector3(...p));
@@ -500,7 +560,7 @@ function focusOnPoint(id) {
 }
 
 function focusOnVector(v, regionSize = 0.8) {
-  const outward = v.clone().sub(bodyAxisPoint(v));
+  const outward = v.clone().sub(axisPoint(v));
   if (outward.lengthSq() < 1e-6) outward.set(0, 0, 1);
   framedFlyTo(v, outward.normalize(), regionSize);
 }
@@ -672,11 +732,47 @@ function syncSidebarSelection() {
 $('op-slider').addEventListener('input', e => {
   const v = e.target.value / 100;
   skinMat.opacity = v;
-  bodyGroup.visible = v > 0.005;
+  bodyGroup.visible = v > 0.005;   // 體表關掉時，深度預繪也一起關，穴位才會全部露出來
 });
 $('tg-routes').addEventListener('change', e => { state.showRoutes = e.target.checked; applyHighlights(); });
 $('tg-labels').addEventListener('change', e => { state.showLabels = e.target.checked; labelsDirty = true; });
 $('tg-allmus').addEventListener('change', e => { state.showAllMuscles = e.target.checked; applyHighlights(); });
+
+// 骨骼是額外的一包資料，第一次打開才下載
+let bonesGroup = null, bonesLoading = false;
+const bonesToggle = $('tg-bones');
+if (!anatomy) { bonesToggle.disabled = true; bonesToggle.parentElement.style.opacity = 0.4; }
+bonesToggle.addEventListener('change', async e => {
+  const on = e.target.checked;
+  if (bonesGroup) { bonesGroup.visible = on; return; }
+  if (!on || !anatomy || bonesLoading) return;
+  bonesLoading = true;
+  bonesToggle.parentElement.style.opacity = 0.55;
+  try {
+    const parts = await anatomy.loadBones();
+    bonesGroup = new THREE.Group();
+    const mat = new THREE.MeshStandardMaterial({
+      color: 0xeae3d4, roughness: 0.8, metalness: 0.0,
+      transparent: true, opacity: 0.96, depthWrite: false,
+    });
+    for (const part of parts) {
+      const geos = part.mirror ? [part.geometry, mirrorGeometry(part.geometry)] : [part.geometry];
+      for (const geo of geos) {
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.renderOrder = 0;
+        bonesGroup.add(mesh);
+      }
+    }
+    bonesGroup.visible = bonesToggle.checked;
+    scene.add(bonesGroup);
+  } catch (err) {
+    console.warn('[ACU] 骨骼載入失敗：', err.message);
+    bonesToggle.checked = false;
+  } finally {
+    bonesLoading = false;
+    bonesToggle.parentElement.style.opacity = '';
+  }
+});
 
 document.querySelectorAll('#viewtools [data-view]').forEach(b => b.onclick = () => setView(b.dataset.view));
 $('btn-reset').onclick = () => { controls.autoRotate = false; $('btn-spin').classList.remove('on'); focusHome(); };
