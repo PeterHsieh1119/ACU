@@ -2,110 +2,299 @@
 <html lang="zh-Hant">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#0e1216">
+<meta name="description" content="針灸經絡穴位 × 肌肉解剖 × PNF 對角模式的 3D 學習輔助工具">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23171d24'/%3E%3Ccircle cx='16' cy='10' r='3.2' fill='%234fc3f7'/%3E%3Cpath d='M16 13.5v11' stroke='%234fc3f7' stroke-width='2.2' stroke-linecap='round'/%3E%3Cpath d='M9 18h14' stroke='%23ff7b72' stroke-width='2.2' stroke-linecap='round'/%3E%3C/svg%3E">
 <title>ACU — 針灸 × PNF 3D 輔助</title>
 <style>
   :root {
-    --bg: #101418; --panel: #1a2027; --panel2: #222a33; --line: #303a45;
-    --text: #e8edf2; --dim: #8fa0b0; --accent: #4fc3f7; --hot: #ff6b6b;
+    --bg: #0e1216; --panel: #171d24; --panel2: #202832; --panel3: #2a333f;
+    --line: #2c3742; --text: #e9eef3; --dim: #8fa0b0; --dim2: #6d7d8c;
+    --accent: #4fc3f7; --accent2: #1c3d4d; --hot: #ff7b72; --warm: #f0c36d;
+    --sidebar-w: 320px;
   }
-  * { margin: 0; padding: 0; box-sizing: border-box; }
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   html, body { height: 100%; overflow: hidden; }
-  body { background: var(--bg); color: var(--text); font-family: "Microsoft JhengHei", "PingFang TC", system-ui, sans-serif; display: flex; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: "Noto Sans TC", "Microsoft JhengHei", "PingFang TC", system-ui, -apple-system, sans-serif;
+    font-size: 14px; display: flex;
+  }
+  button, input, select { font-family: inherit; }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
 
-  #sidebar { width: 300px; min-width: 300px; background: var(--panel); border-right: 1px solid var(--line); display: flex; flex-direction: column; }
-  #brand { padding: 12px 14px; border-bottom: 1px solid var(--line); }
-  #brand h1 { font-size: 17px; letter-spacing: 1px; }
+  /* ---------- 側欄 ---------- */
+  #sidebar {
+    width: var(--sidebar-w); min-width: var(--sidebar-w); background: var(--panel);
+    border-right: 1px solid var(--line); display: flex; flex-direction: column; z-index: 30;
+  }
+  #brand { padding: 11px 14px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 8px; }
+  #brand .txt { flex: 1; min-width: 0; }
+  #brand h1 { font-size: 16px; letter-spacing: .5px; font-weight: 700; }
   #brand h1 span { color: var(--accent); }
   #brand p { font-size: 11px; color: var(--dim); margin-top: 2px; }
+  #drawer-close { display: none; background: none; border: 0; color: var(--dim); font-size: 20px; cursor: pointer; padding: 2px 6px; }
 
   #tabs { display: flex; border-bottom: 1px solid var(--line); }
-  .tab { flex: 1; text-align: center; padding: 9px 0; font-size: 14px; cursor: pointer; color: var(--dim); border-bottom: 2px solid transparent; }
-  .tab.active { color: var(--text); border-bottom-color: var(--accent); }
+  .tab { flex: 1; text-align: center; padding: 10px 0; font-size: 13.5px; cursor: pointer; color: var(--dim); border-bottom: 2px solid transparent; user-select: none; }
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--text); border-bottom-color: var(--accent); background: rgba(79,195,247,.06); }
 
-  .pane { flex: 1; overflow-y: auto; padding: 10px 12px; display: none; }
+  .pane { flex: 1; overflow-y: auto; padding: 10px 12px 16px; display: none; overscroll-behavior: contain; }
   .pane.active { display: block; }
 
-  #search { width: 100%; padding: 7px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel2); color: var(--text); font-size: 13px; margin-bottom: 10px; }
-  #search:focus { outline: 1px solid var(--accent); }
+  .field { position: relative; margin-bottom: 8px; }
+  .field input {
+    width: 100%; padding: 8px 28px 8px 10px; border-radius: 7px; border: 1px solid var(--line);
+    background: var(--panel2); color: var(--text); font-size: 13px;
+  }
+  .field input:focus { outline: none; border-color: var(--accent); }
+  .field .clear { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); background: none; border: 0; color: var(--dim); cursor: pointer; font-size: 15px; padding: 2px 4px; }
 
-  .mrow { display: flex; align-items: center; gap: 7px; padding: 4px 2px; font-size: 13px; cursor: pointer; border-radius: 4px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 9px; }
+  .chip {
+    font-size: 11.5px; padding: 3.5px 9px; border-radius: 20px; cursor: pointer;
+    background: var(--panel2); border: 1px solid var(--line); color: var(--dim); user-select: none;
+  }
+  .chip:hover { color: var(--text); }
+  .chip.on { background: var(--accent2); border-color: var(--accent); color: #cfefff; }
+
+  details.group { margin-bottom: 8px; }
+  details.group > summary {
+    cursor: pointer; font-size: 12px; color: var(--dim); padding: 5px 2px; user-select: none;
+    display: flex; align-items: center; gap: 6px; list-style: none;
+  }
+  details.group > summary::-webkit-details-marker { display: none; }
+  details.group > summary::before { content: '▸'; font-size: 10px; transition: transform .15s; }
+  details.group[open] > summary::before { transform: rotate(90deg); }
+  details.group > summary .sp { margin-left: auto; display: flex; gap: 4px; }
+  details.group > summary .sp button { font-size: 10.5px; padding: 2px 7px; border-radius: 5px; background: var(--panel2); border: 1px solid var(--line); color: var(--dim); cursor: pointer; }
+  details.group > summary .sp button:hover { color: var(--text); }
+
+  .mrow { display: flex; align-items: center; gap: 7px; padding: 4px 4px; font-size: 12.8px; cursor: pointer; border-radius: 5px; }
   .mrow:hover { background: var(--panel2); }
-  .mdot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
-  .mrow .cnt { margin-left: auto; color: var(--dim); font-size: 11px; }
-  .quickbtns { display: flex; gap: 6px; margin: 8px 0; }
-  .quickbtns button { flex: 1; padding: 5px 0; font-size: 12px; background: var(--panel2); color: var(--dim); border: 1px solid var(--line); border-radius: 5px; cursor: pointer; }
-  .quickbtns button:hover { color: var(--text); }
+  .mrow input { accent-color: var(--accent); cursor: pointer; }
+  .mdot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+  .mrow .cnt { margin-left: auto; color: var(--dim2); font-size: 10.5px; }
 
-  #ptlist { margin-top: 6px; }
-  .prow { padding: 5px 8px; font-size: 13px; cursor: pointer; border-radius: 4px; display: flex; gap: 8px; align-items: baseline; }
-  .prow:hover, .prow.sel { background: var(--panel2); }
-  .prow .code { color: var(--dim); font-size: 11px; width: 42px; flex: none; }
+  .listhead { font-size: 11px; color: var(--dim2); padding: 8px 2px 4px; border-top: 1px solid var(--line); margin-top: 6px; }
+  .prow {
+    padding: 6px 8px; font-size: 13px; cursor: pointer; border-radius: 5px;
+    display: flex; gap: 8px; align-items: baseline;
+  }
+  .prow:hover { background: var(--panel2); }
+  .prow.sel { background: var(--accent2); }
+  .prow .code { color: var(--dim); font-size: 10.5px; width: 46px; flex: none; }
+  .prow .nm { flex: 1; }
+  .prow .mer { font-size: 10px; }
+  .empty { color: var(--dim2); font-size: 12px; padding: 14px 4px; text-align: center; }
 
-  .pnfbtn { display: block; width: 100%; text-align: left; padding: 9px 10px; margin-bottom: 7px; background: var(--panel2); border: 1px solid var(--line); border-radius: 7px; color: var(--text); font-size: 14px; cursor: pointer; }
-  .pnfbtn small { display: block; color: var(--dim); font-size: 11px; margin-top: 2px; }
-  .pnfbtn.sel { border-color: var(--hot); background: #2b2026; }
-  #pnfclear { width: 100%; padding: 6px 0; font-size: 12px; background: none; border: 1px dashed var(--line); border-radius: 6px; color: var(--dim); cursor: pointer; margin-bottom: 10px; }
+  .pnfbtn {
+    display: block; width: 100%; text-align: left; padding: 9px 10px; margin-bottom: 6px;
+    background: var(--panel2); border: 1px solid var(--line); border-radius: 7px; color: var(--text);
+    font-size: 13.5px; cursor: pointer;
+  }
+  .pnfbtn:hover { border-color: var(--dim2); }
+  .pnfbtn small { display: block; color: var(--dim); font-size: 11px; margin-top: 3px; line-height: 1.45; }
+  .pnfbtn.sel { border-color: var(--hot); background: #2c2126; }
+  .textbtn { width: 100%; padding: 6px 0; font-size: 12px; background: none; border: 1px dashed var(--line); border-radius: 6px; color: var(--dim); cursor: pointer; margin-bottom: 10px; }
+  .textbtn:hover { color: var(--text); border-color: var(--dim2); }
 
-  #viewport { flex: 1; position: relative; }
+  #footer { padding: 8px 12px; font-size: 10px; color: var(--dim2); border-top: 1px solid var(--line); line-height: 1.5; }
+
+  /* ---------- 3D 區 ---------- */
+  #viewport { flex: 1; position: relative; min-width: 0; }
   #canvas3d { position: absolute; inset: 0; }
-  #hint { position: absolute; left: 12px; bottom: 10px; font-size: 11px; color: var(--dim); pointer-events: none; }
-  #opacity-ctl { position: absolute; left: 12px; top: 10px; font-size: 12px; color: var(--dim); background: rgba(16,20,24,.7); padding: 6px 10px; border-radius: 6px; display: flex; gap: 8px; align-items: center; }
+  #canvas3d canvas { display: block; touch-action: none; }
 
-  #info { position: absolute; right: 12px; top: 12px; width: 320px; max-height: calc(100% - 60px); overflow-y: auto; background: rgba(26,32,39,.96); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; display: none; }
+  #topbar { display: none; }
+  #menu-btn {
+    background: rgba(23,29,36,.9); border: 1px solid var(--line); color: var(--text);
+    border-radius: 8px; padding: 7px 11px; font-size: 15px; cursor: pointer;
+  }
+
+  .panelbox {
+    position: absolute; background: rgba(20,26,32,.88); border: 1px solid var(--line);
+    border-radius: 9px; padding: 8px 10px; backdrop-filter: blur(6px);
+  }
+  #viewtools { left: 12px; top: 12px; display: flex; gap: 5px; align-items: center; flex-wrap: wrap; max-width: calc(100% - 24px); }
+  #viewtools button {
+    font-size: 11.5px; padding: 4px 9px; border-radius: 6px; background: var(--panel2);
+    border: 1px solid var(--line); color: var(--dim); cursor: pointer;
+  }
+  #viewtools button:hover { color: var(--text); }
+  #viewtools button.on { background: var(--accent2); border-color: var(--accent); color: #cfefff; }
+  #viewtools .sep { width: 1px; height: 16px; background: var(--line); margin: 0 2px; }
+
+  #layertools { left: 12px; bottom: 12px; font-size: 11.5px; color: var(--dim); display: flex; flex-direction: column; gap: 6px; }
+  #layertools label { display: flex; align-items: center; gap: 7px; cursor: pointer; }
+  #layertools input[type=checkbox] { accent-color: var(--accent); cursor: pointer; }
+  #layertools input[type=range] { width: 108px; accent-color: var(--accent); cursor: pointer; }
+  #layertools .row { display: flex; align-items: center; gap: 8px; }
+
+  #hint { position: absolute; right: 12px; bottom: 12px; font-size: 10.5px; color: var(--dim2); pointer-events: none; text-align: right; line-height: 1.6; }
+
+  #tooltip {
+    position: absolute; pointer-events: none; background: rgba(14,18,22,.94); border: 1px solid var(--line);
+    border-radius: 6px; padding: 4px 9px; font-size: 12px; white-space: nowrap; display: none; z-index: 12;
+  }
+  #tooltip .sub { color: var(--dim); font-size: 10.5px; margin-left: 5px; }
+
+  #labels { position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 8; }
+  .lab {
+    position: absolute; transform: translate(-50%, -140%); font-size: 10.5px; color: #dbe6ef;
+    background: rgba(14,18,22,.72); border-radius: 4px; padding: 1px 5px; white-space: nowrap;
+    border: 1px solid rgba(120,140,160,.25);
+  }
+  .lab.sel { color: #fff; background: rgba(79,195,247,.28); border-color: var(--accent); font-size: 11.5px; }
+
+  #info {
+    position: absolute; right: 12px; top: 12px; width: 330px; max-height: calc(100% - 24px);
+    overflow-y: auto; background: rgba(23,29,36,.97); border: 1px solid var(--line);
+    border-radius: 11px; padding: 14px 16px 16px; display: none; z-index: 15; overscroll-behavior: contain;
+  }
   #info.show { display: block; }
-  #info h2 { font-size: 18px; }
+  #info h2 { font-size: 18px; line-height: 1.3; padding-right: 22px; }
   #info h2 small { color: var(--dim); font-weight: normal; font-size: 12px; margin-left: 6px; }
-  #info .meri { font-size: 12px; margin: 4px 0 10px; }
-  #info dl { font-size: 13px; line-height: 1.55; }
-  #info dt { color: var(--dim); font-size: 11px; margin-top: 8px; }
-  #info dd { margin: 1px 0 0; }
-  #info .mus-tag, #info .pnf-tag { display: inline-block; font-size: 11px; padding: 2px 7px; border-radius: 10px; margin: 2px 3px 0 0; }
-  #info .mus-tag { background: #3a2427; color: #ffb3b3; }
-  #info .pnf-tag { background: #1e3a45; color: #9adcf7; cursor: pointer; }
-  #info .close { position: absolute; right: 10px; top: 8px; color: var(--dim); cursor: pointer; font-size: 16px; }
-  #info .warn { font-size: 11px; color: #f0c36d; margin-top: 10px; }
+  #info .sub { font-size: 12px; margin: 5px 0 4px; }
+  #info dl { font-size: 12.8px; line-height: 1.6; }
+  #info dt { color: var(--dim); font-size: 11px; margin-top: 9px; letter-spacing: .5px; }
+  #info dd { margin: 2px 0 0; }
+  #info .close { position: absolute; right: 9px; top: 7px; color: var(--dim); cursor: pointer; font-size: 17px; line-height: 1; padding: 3px 5px; }
+  #info .close:hover { color: var(--text); }
+  #info .warn { font-size: 10.5px; color: var(--warm); margin-top: 12px; line-height: 1.55; border-top: 1px solid var(--line); padding-top: 8px; }
+  .tag { display: inline-block; font-size: 11px; padding: 2.5px 8px; border-radius: 11px; margin: 3px 4px 0 0; }
+  .tag.mus { background: #3a2427; color: #ffb3b3; cursor: pointer; }
+  .tag.pnf { background: #1e3a45; color: #9adcf7; cursor: pointer; }
+  .tag.pt { background: #2b3324; color: #cbe6a5; cursor: pointer; }
+  .tag.attr { background: var(--panel3); color: var(--dim); }
+  .tag.mus:hover, .tag.pnf:hover, .tag.pt:hover { filter: brightness(1.25); }
+  .navrow { display: flex; gap: 6px; margin-top: 12px; }
+  .navrow button { flex: 1; font-size: 11.5px; padding: 5px 0; border-radius: 6px; background: var(--panel2); border: 1px solid var(--line); color: var(--dim); cursor: pointer; }
+  .navrow button:hover { color: var(--text); }
 
-  #footer { padding: 8px 12px; font-size: 10px; color: var(--dim); border-top: 1px solid var(--line); line-height: 1.5; }
-  ::-webkit-scrollbar { width: 8px; } ::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px; }
+  #loading {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    background: var(--bg); color: var(--dim); font-size: 13px; z-index: 40; transition: opacity .4s;
+  }
+  #loading.done { opacity: 0; pointer-events: none; }
+  #scrim { display: none; }
+
+  /* ---------- 手機 / 平板 ---------- */
+  @media (max-width: 880px) {
+    #sidebar {
+      position: fixed; inset: 0 auto 0 0; width: min(88vw, 340px); transform: translateX(-102%);
+      transition: transform .22s ease; box-shadow: 0 0 30px rgba(0,0,0,.5);
+    }
+    body.drawer #sidebar { transform: none; }
+    #drawer-close { display: block; }
+    #scrim { display: block; position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 25; opacity: 0; pointer-events: none; transition: opacity .22s; }
+    body.drawer #scrim { opacity: 1; pointer-events: auto; }
+    #topbar { display: flex; position: absolute; left: 12px; top: 12px; z-index: 14; gap: 8px; align-items: center; }
+    #viewtools { left: 12px; top: 60px; padding: 6px 8px; }
+    #viewtools button { padding: 5px 9px; }
+    #layertools { left: 12px; bottom: 12px; padding: 7px 9px; font-size: 11px; }
+    #layertools input[type=range] { width: 84px; }
+    #hint { display: none; }
+    #info {
+      right: 0; left: 0; top: auto; bottom: 0; width: auto; max-height: 62%;
+      border-radius: 14px 14px 0 0; border-width: 1px 0 0;
+      padding-bottom: calc(16px + env(safe-area-inset-bottom));
+    }
+  }
+  @media (max-width: 880px) and (max-height: 520px) {
+    #layertools { display: none; }
+  }
 </style>
 </head>
 <body>
-  <div id="sidebar">
+  <aside id="sidebar">
     <div id="brand">
-      <h1>ACU <span>針灸 × PNF</span> 3D 輔助</h1>
-      <p>經絡穴位 ↔ 肌肉 ↔ PNF 對角模式</p>
+      <div class="txt">
+        <h1>ACU <span>針灸 × PNF</span></h1>
+        <p>經絡穴位 ↔ 肌肉 ↔ PNF 對角模式</p>
+      </div>
+      <button id="drawer-close" aria-label="關閉選單">✕</button>
     </div>
     <div id="tabs">
-      <div class="tab active" data-pane="pane-meri">經絡穴位</div>
-      <div class="tab" data-pane="pane-pnf">PNF 模式</div>
+      <div class="tab active" data-pane="pane-point">經絡穴位</div>
+      <div class="tab" data-pane="pane-muscle">肌肉</div>
+      <div class="tab" data-pane="pane-pnf">PNF</div>
     </div>
-    <div id="pane-meri" class="pane active">
-      <input id="search" type="text" placeholder="搜尋穴位（名稱或代號）…">
-      <div class="quickbtns">
-        <button id="btn-all">全選</button>
-        <button id="btn-none">全不選</button>
+
+    <div id="pane-point" class="pane active">
+      <div class="field">
+        <input id="search" type="text" placeholder="搜尋穴位：名稱、代號、主治…" autocomplete="off">
+        <button class="clear" id="search-clear" aria-label="清除">✕</button>
       </div>
-      <div id="merilist"></div>
+      <div class="chips" id="region-chips"></div>
+      <details class="group" id="meri-group">
+        <summary>經絡篩選<span class="sp"><button id="btn-all">全選</button><button id="btn-none">全不選</button></span></summary>
+        <div id="merilist"></div>
+      </details>
+      <div class="listhead" id="ptcount"></div>
       <div id="ptlist"></div>
     </div>
+
+    <div id="pane-muscle" class="pane">
+      <div class="field">
+        <input id="msearch" type="text" placeholder="搜尋肌肉：中文、拉丁名、動作…" autocomplete="off">
+        <button class="clear" id="msearch-clear" aria-label="清除">✕</button>
+      </div>
+      <button class="textbtn" id="mclear">清除肌肉選取</button>
+      <div id="muslist"></div>
+    </div>
+
     <div id="pane-pnf" class="pane">
-      <button id="pnfclear">清除模式選取</button>
+      <button class="textbtn" id="pnfclear">清除模式選取</button>
       <div id="pnflist"></div>
     </div>
+
     <div id="footer">
-      本工具僅供解剖與經絡「學習參考」，穴位座標為示意近似、針刺深度為教科書常見值，不可作為臨床操作依據。實際針灸請由合格中醫師執行。
+      本工具僅供解剖與經絡「學習參考」。穴位座標為示意近似、針刺深度為教科書常見值，不可作為臨床操作依據。實際針灸請由合格中醫師執行。
     </div>
-  </div>
-  <div id="viewport">
+  </aside>
+  <div id="scrim"></div>
+
+  <main id="viewport">
     <div id="canvas3d"></div>
-    <div id="opacity-ctl">體表透明度 <input id="op-slider" type="range" min="10" max="100" value="80" style="width:110px"></div>
-    <div id="hint">拖曳旋轉｜滾輪縮放｜點擊穴位查看資訊</div>
-    <div id="info">
+
+    <div id="topbar"><button id="menu-btn" aria-label="開啟選單">☰</button></div>
+
+    <div id="viewtools" class="panelbox">
+      <button data-view="front">前</button>
+      <button data-view="back">後</button>
+      <button data-view="left">左</button>
+      <button data-view="right">右</button>
+      <button data-view="top">頂</button>
+      <span class="sep"></span>
+      <button id="btn-reset">重置視角</button>
+      <button id="btn-spin">自轉</button>
+    </div>
+
+    <div id="layertools" class="panelbox">
+      <div class="row"><span>體表</span><input id="op-slider" type="range" min="0" max="100" value="42" aria-label="體表透明度"></div>
+      <label><input type="checkbox" id="tg-routes" checked> 經絡線</label>
+      <label><input type="checkbox" id="tg-labels"> 穴名標籤</label>
+      <label><input type="checkbox" id="tg-allmus"> 顯示全部肌肉</label>
+    </div>
+
+    <div id="hint">拖曳旋轉｜滾輪縮放｜點擊穴位或肌肉查看資訊<br>Esc 清除選取｜↑↓ 切換穴位</div>
+
+    <div id="tooltip"></div>
+    <div id="labels"></div>
+
+    <aside id="info">
       <span class="close" id="info-close">✕</span>
       <div id="info-body"></div>
-    </div>
-  </div>
+    </aside>
+
+    <div id="loading">建立解剖模型中…</div>
+  </main>
+
   <script type="importmap">
   {
     "imports": {
