@@ -65,12 +65,21 @@ new ResizeObserver(resize).observe(container);
 // ============================================================
 // 人體：優先使用真實解剖資料，載入失敗才退回內建示意模型
 // ============================================================
+const loadingEl = $('loading');
+const setLoading = t => { loadingEl.textContent = t; };
+const statusEl = $('status');
+const setStatus = t => { statusEl.textContent = t; statusEl.style.display = t ? 'block' : 'none'; };
+const pct = (got, total) => (total ? ` ${Math.round(got / total * 100)}%` : '');
+
 let anatomy = null;
 try {
-  anatomy = await loadAnatomy();
+  anatomy = await loadAnatomy((got, total) => {
+    setLoading(total ? `載入體表 ${Math.round(got / total * 100)}%` : '載入體表…');
+  });
 } catch (err) {
   console.warn('[ACU] 解剖資料載入失敗，改用內建示意模型：', err.message);
 }
+setLoading('建立模型…');
 
 const bodyGroup = new THREE.Group();
 scene.add(bodyGroup);
@@ -240,31 +249,55 @@ const muscleGroup = new THREE.Group();
 scene.add(muscleGroup);
 const muscleMeshes = {};   // id -> { meshes:[], mat }
 
-for (const [id, mu] of Object.entries(MUSCLES)) {
-  const mat = new THREE.MeshStandardMaterial({
-    color: 0xff5a52, emissive: 0x3d0f0f, roughness: 0.55, metalness: 0.0,
-    transparent: true, opacity: mu.deep ? 0.55 : 0.92, depthWrite: false,
-  });
-  const rec = anatomy && anatomy.muscles.get(id);
-  // 來源解剖資料沒有的肌肉仍用示意幾何（扇形肌肉可寫成多股 paths），
-  // 但走行點一樣要搬到真實骨架上，否則會浮在真實體表外面
-  //（maxShift 0 = 只做骨架映射，不吸附體表）
+// 示意幾何：來源解剖資料沒有的肌肉會一直用它，其餘肌肉在真實網格下載完成前先頂著。
+// 走行點一樣要搬到真實骨架上，否則會浮在真實體表外面（maxShift 0 = 只映射、不吸附）。
+function approxGeometries(mu) {
   const strands = (mu.paths || [mu.path])
     .map(pts => anatomy ? pts.map(p => placePoint(p, { maxShift: 0 }).p) : pts);
-  const geometries = rec
-    ? (rec.mirror ? [rec.geometry, mirrorGeometry(rec.geometry)] : [rec.geometry])
-    : strands.flatMap(pts => mu.midline ? [pts] : [pts, pts.map(p => [-p[0], p[1], p[2]])])
-        .map(pts => tube(pts, { r: mu.r, radial: 10 }));
-  const meshes = [];
-  for (const geo of geometries) {
+  return strands
+    .flatMap(pts => mu.midline ? [pts] : [pts, pts.map(p => [-p[0], p[1], p[2]])])
+    .map(pts => tube(pts, { r: mu.r, radial: 10 }));
+}
+
+function setMuscleGeometries(id, geometries, rec) {
+  const prev = muscleMeshes[id];
+  if (prev) {
+    for (const m of prev.meshes) { muscleGroup.remove(m); m.geometry.dispose(); }
+  }
+  const mat = (prev && prev.mat) || new THREE.MeshStandardMaterial({
+    color: 0xff5a52, emissive: 0x3d0f0f, roughness: 0.55, metalness: 0.0,
+    transparent: true, opacity: MUSCLES[id].deep ? 0.55 : 0.92, depthWrite: false,
+  });
+  const meshes = geometries.map(geo => {
     const mesh = new THREE.Mesh(geo, mat);
     mesh.visible = false;
     mesh.userData.muscleId = id;
     mesh.renderOrder = 1;
     muscleGroup.add(mesh);
-    meshes.push(mesh);
-  }
-  muscleMeshes[id] = { meshes, mat, deep: !!mu.deep, real: !!rec, bounds: rec ? rec.bounds : null };
+    return mesh;
+  });
+  muscleMeshes[id] = { meshes, mat, deep: !!MUSCLES[id].deep, real: !!rec, bounds: rec ? rec.bounds : null };
+}
+
+for (const [id, mu] of Object.entries(MUSCLES)) setMuscleGeometries(id, approxGeometries(mu), null);
+
+// 真實肌肉網格背景載入，到了再換掉示意幾何
+let muscleAssets = anatomy ? 'loading' : 'none';
+if (anatomy) {
+  setStatus('肌肉網格載入中…');
+  anatomy.loadMuscles((got, total) => setStatus(`肌肉網格載入中…${pct(got, total)}`)).then(map => {
+    for (const [id, rec] of map) {
+      setMuscleGeometries(id, rec.mirror ? [rec.geometry, mirrorGeometry(rec.geometry)] : [rec.geometry], rec);
+    }
+    muscleAssets = 'ready';
+    applyHighlights();
+    if (state.sel.kind === 'muscle') showMuscleInfo(state.sel.id);
+    setStatus('');
+  }).catch(err => {
+    console.warn('[ACU] 肌肉網格載入失敗，維持示意幾何：', err.message);
+    muscleAssets = 'failed';
+    setStatus('');
+  });
 }
 
 const MUS_BASE = 0xff5a52, MUS_HL = 0xffb057, MUS_SEL = 0xffe08a;
@@ -432,7 +465,9 @@ function showMuscleInfo(id) {
     </dl>
     <div class="warn">${muscleMeshes[id] && muscleMeshes[id].real
       ? '幾何取自 BodyParts3D 解剖模型（CC BY 4.0），為教學用簡化網格。'
-      : '來源解剖資料未包含此肌肉，此處以簡化示意幾何（起止線＋梭形肌腹）表示。'}</div>`;
+      : muscleAssets === 'loading'
+        ? '真實解剖網格載入中，目前顯示的是示意幾何。'
+        : '來源解剖資料未包含此肌肉，此處以簡化示意幾何（起止線＋梭形肌腹）表示。'}</div>`;
   infoEl.classList.add('show');
   infoEl.scrollTop = 0;
   bindInfoTags();
@@ -758,8 +793,9 @@ bonesToggle.addEventListener('change', async e => {
   if (!on || !anatomy || bonesLoading) return;
   bonesLoading = true;
   bonesToggle.parentElement.style.opacity = 0.55;
+  setStatus('骨骼網格載入中…');
   try {
-    const parts = await anatomy.loadBones();
+    const parts = await anatomy.loadBones((got, total) => setStatus(`骨骼網格載入中…${pct(got, total)}`));
     bonesGroup = new THREE.Group();
     const mat = new THREE.MeshStandardMaterial({
       color: 0xeae3d4, roughness: 0.8, metalness: 0.0,
@@ -781,6 +817,7 @@ bonesToggle.addEventListener('change', async e => {
   } finally {
     bonesLoading = false;
     bonesToggle.parentElement.style.opacity = '';
+    setStatus('');
   }
 });
 

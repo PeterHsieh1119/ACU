@@ -159,7 +159,40 @@ const partsNamed = want => (byStripped.get(want) || []).filter(p => !isRight(p))
 // ---------------------------------------------------------------
 await MeshoptSimplifier.ready;
 
-/** 把多個來源網格併成一個，選擇性精簡，回傳 {pos, idx} */
+/**
+ * 焊接重合頂點。
+ * 來源網格沒有共用頂點（138k 個三角形配到 257k 個頂點），既浪費一倍空間，
+ * 也讓 meshoptimizer 無法跨接縫收邊、簡化到一半就卡住。先焊接再簡化，
+ * 檔案小一半、簡化效果也好得多。
+ */
+function weld(pos, idx, eps = 1e-5) {
+  const inv = 1 / eps;
+  const map = new Map();
+  const remap = new Int32Array(pos.length / 3);
+  const out = [];
+  for (let i = 0; i < remap.length; i++) {
+    const key = `${Math.round(pos[i * 3] * inv)},${Math.round(pos[i * 3 + 1] * inv)},${Math.round(pos[i * 3 + 2] * inv)}`;
+    let v = map.get(key);
+    if (v === undefined) {
+      v = out.length / 3;
+      map.set(key, v);
+      out.push(pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]);
+    }
+    remap[i] = v;
+  }
+  const ni = new Uint32Array(idx.length);
+  for (let i = 0; i < idx.length; i++) ni[i] = remap[idx[i]];
+  // 焊接後可能出現退化三角形（三個角收成同一點），一併丟掉
+  const keep = [];
+  for (let t = 0; t < ni.length; t += 3) {
+    if (ni[t] !== ni[t + 1] && ni[t + 1] !== ni[t + 2] && ni[t] !== ni[t + 2]) {
+      keep.push(ni[t], ni[t + 1], ni[t + 2]);
+    }
+  }
+  return { pos: new Float32Array(out), idx: new Uint32Array(keep) };
+}
+
+/** 把多個來源網格併成一個，焊接後選擇性精簡，回傳 {pos, idx} */
 function mergeAndSimplify(parts, ratio, error) {
   let vc = 0, ic = 0;
   for (const p of parts) { vc += p.vertexCount; ic += p.indexCount; }
@@ -171,11 +204,12 @@ function mergeAndSimplify(parts, ratio, error) {
     for (let i = 0; i < si.length; i++) idx[io + i] = si[i] + vo;
     vo += p.vertexCount; io += si.length;
   }
-  const triCount = idx.length / 3;
-  if (ratio >= 1 || triCount < 1200) return compact(pos, idx);   // 小網格再砍就會塌掉
+  const welded = weld(pos, idx);
+  const triCount = welded.idx.length / 3;
+  if (ratio >= 1 || triCount < 600) return compact(welded.pos, welded.idx);   // 小網格再砍就會塌掉
   const target = Math.max(24, Math.floor(triCount * ratio) * 3);
-  const [simplified] = MeshoptSimplifier.simplify(idx, pos, 3, target, error, ['LockBorder']);
-  return compact(pos, simplified);
+  const [simplified] = MeshoptSimplifier.simplify(welded.idx, welded.pos, 3, target, error, ['LockBorder']);
+  return compact(welded.pos, simplified);
 }
 
 /** 丟掉未被索引到的頂點 */
@@ -201,14 +235,14 @@ const missing = [];
 
 const skinParts = partsNamed('skin');
 if (!skinParts.length) throw new Error('來源缺少 Skin');
-groups.skin.push({ key: 'skin', name: 'Skin', parts: skinParts, ratio: 1 });
+groups.skin.push({ key: 'skin', name: 'Skin', parts: skinParts, ratio: 0.6, error: 0.002 });
 
 const usedByMuscles = new Set();
 for (const [key, names] of Object.entries(MUSCLE_MAP)) {
   const parts = names.flatMap(partsNamed);
   if (!parts.length) { missing.push(key); continue; }
   for (const p of parts) usedByMuscles.add(p.id);
-  groups.muscles.push({ key, name: names[0], parts, ratio: 0.55, error: 0.02 });
+  groups.muscles.push({ key, name: names[0], parts, ratio: 0.45, error: 0.02 });
 }
 
 // 來源把脛前肌、提肩胛肌等歸在 skeletal，得把已經當肌肉用掉的部位排除，

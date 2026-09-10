@@ -11,16 +11,45 @@ import * as THREE from 'three';
 
 const BASE = new URL('../data/anatomy/', import.meta.url);
 
-async function fetchBuffer(file) {
-  const res = await fetch(new URL(file, BASE));
+/** index.html 在 head 就先發出的請求，這裡接手續用，避免重複下載 */
+function takePrefetched(file) {
+  const store = typeof window !== 'undefined' && window.__acuPrefetch;
+  if (!store || !store[file]) return null;
+  const p = store[file];
+  delete store[file];
+  return p;
+}
+
+async function fetchBuffer(file, onProgress) {
+  const res = await (takePrefetched(file) || fetch(new URL(file, BASE)));
   if (!res.ok) throw new Error(`${file}: HTTP ${res.status}`);
-  const payload = await res.arrayBuffer();
+  const payload = onProgress ? await readWithProgress(res, onProgress) : await res.arrayBuffer();
   // 伺服器若已經自動解壓（Content-Encoding: gzip），這裡就不會看到 gzip 魔術位元組
   const head = new Uint8Array(payload, 0, Math.min(2, payload.byteLength));
   if (head[0] !== 0x1f || head[1] !== 0x8b) return payload;
   if (typeof DecompressionStream !== 'function') throw new Error('瀏覽器不支援 DecompressionStream');
   const stream = new Blob([payload]).stream().pipeThrough(new DecompressionStream('gzip'));
   return await new Response(stream).arrayBuffer();
+}
+
+/** 邊下載邊回報進度，載入畫面才不會像卡住 */
+async function readWithProgress(res, onProgress) {
+  const total = Number(res.headers.get('content-length')) || 0;
+  if (!res.body) return await res.arrayBuffer();
+  const reader = res.body.getReader();
+  const chunks = [];
+  let received = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    received += value.length;
+    onProgress(received, total);
+  }
+  const out = new Uint8Array(received);
+  let at = 0;
+  for (const c of chunks) { out.set(c, at); at += c.length; }
+  return out.buffer;
 }
 
 function geometryFromRecord(buffer, rec, quant) {
@@ -54,10 +83,10 @@ export function mirrorGeometry(geo) {
   return out;
 }
 
-async function loadGroup(manifest, name) {
+async function loadGroup(manifest, name, onProgress) {
   const group = manifest.groups[name];
   if (!group) throw new Error(`manifest 缺少群組 ${name}`);
-  const buffer = await fetchBuffer(group.file);
+  const buffer = await fetchBuffer(group.file, onProgress);
   return group.parts.map(rec => ({
     key: rec.key,
     name: rec.name,
@@ -68,17 +97,21 @@ async function loadGroup(manifest, name) {
 }
 
 /**
- * 載入體表與肌肉（骨骼另外用 loadBones() 延遲載入）。
+ * 只等體表就回傳——體表一到就能畫出人體與穴位。
+ * 肌肉（約 0.8 MB）與骨骼（約 0.6 MB）改由呼叫端在背景載入，
+ * 不然首次開啟要等 2 MB 下載完才看得到東西。
  * 任何一步失敗都會 reject，呼叫端要能退回內建的示意模型。
  */
-export async function loadAnatomy() {
-  const manifest = await (await fetch(new URL('manifest.json', BASE))).json();
-  const [skin, muscles] = await Promise.all([loadGroup(manifest, 'skin'), loadGroup(manifest, 'muscles')]);
+export async function loadAnatomy(onProgress) {
+  const manifestRes = await (takePrefetched('manifest.json') || fetch(new URL('manifest.json', BASE)));
+  const manifest = await manifestRes.json();
+  const skin = await loadGroup(manifest, 'skin', onProgress);
   return {
     manifest,
     landmarks: manifest.landmarks,
     skin: skin[0],
-    muscles: new Map(muscles.map(m => [m.key, m])),
-    loadBones: () => loadGroup(manifest, 'bones'),
+    sizes: Object.fromEntries(Object.entries(manifest.groups).map(([k, g]) => [k, g.gzipBytes])),
+    loadMuscles: p => loadGroup(manifest, 'muscles', p).then(list => new Map(list.map(m => [m.key, m]))),
+    loadBones: p => loadGroup(manifest, 'bones', p),
   };
 }
