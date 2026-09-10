@@ -207,6 +207,13 @@
   .tag.ves.vein { background: #1c2a3d; color: #a3c4ef; cursor: pointer; }
   .tag.mus:hover, .tag.pnf:hover, .tag.pt:hover, .tag.nrv:hover, .tag.ves:hover { filter: brightness(1.25); }
   .tag .dist { opacity: 0.62; font-size: 10px; margin-left: 4px; }
+  #cunref { font-size: 11.5px; color: var(--dim); }
+  #cunref .part { margin: 7px 0 3px; color: var(--dim2); font-size: 10.5px; letter-spacing: .04em; }
+  #cunref .crow { display: flex; gap: 6px; align-items: baseline; padding: 2.5px 0; line-height: 1.45; }
+  #cunref .crow .cn { flex: none; min-width: 34px; color: var(--accent); font-variant-numeric: tabular-nums; }
+  #cunref .crow .nm { flex: 1; min-width: 0; }
+  #cunref .crow .cm { flex: none; color: var(--dim2); font-size: 10px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  #cunref .note { color: var(--dim2); font-size: 10.5px; line-height: 1.5; margin-top: 6px; }
   .navrow { display: flex; gap: 6px; margin-top: 12px; }
   .navrow button { flex: 1; font-size: 11.5px; padding: 5px 0; border-radius: 6px; background: var(--panel2); border: 1px solid var(--line); color: var(--dim); cursor: pointer; }
   .navrow button:hover { color: var(--text); }
@@ -271,6 +278,10 @@
       <details class="group" id="meri-group">
         <summary>經絡篩選<span class="sp"><button id="btn-all">全選</button><button id="btn-none">全不選</button></span></summary>
         <div id="merilist"></div>
+      </details>
+      <details class="group" id="cun-group">
+        <summary>骨度分寸表<span class="sp" style="color:var(--dim2);font-size:10.5px">量穴用</span></summary>
+        <div id="cunref"></div>
       </details>
       <div class="listhead" id="ptcount"></div>
       <div id="ptlist"></div>

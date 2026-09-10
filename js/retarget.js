@@ -12,6 +12,7 @@
 
 import * as THREE from 'three';
 import { makeSurfaceRay } from './surfaceray.js';
+import { BONE_CUN, landmarkOf } from '../data/cun.js';
 
 const v = (x, y, z) => new THREE.Vector3(x, y, z);
 
@@ -51,13 +52,15 @@ const SOURCE = {
 function targetChains(L) {
   const p = a => v(a[0], a[1], a[2]);
   const sp = L.spinous;
-  const jugular = L.sternumTop[1] + 0.048;             // 胸骨柄上緣（胸骨體頂端往上約一個柄長）
+  const jugular = landmarkOf(L, 'jugularNotch')[1];    // 胸骨上窩（天突）
   const nipple = (L.sternumBottom[1] + L.sternumTop[1]) / 2;
   return {
     trunk: [
       v(0, L.coccyx[1] + 0.003, -0.005),
-      v(0, L.hip[1], 0),
-      v(0, sp.L3 ? sp.L3[1] : 1.056, 0),
+      // 恥骨聯合上緣與臍：骨度的下腹部就是量這兩點。原本用股骨頭頂與第 3 腰椎棘突，
+      // 分別高了 2.3 與 2.4 公分，關元、氣海、天樞那一排會整排偏上。
+      v(0, landmarkOf(L, 'pubicSymphysis')[1], 0),
+      v(0, landmarkOf(L, 'navel')[1], 0),
       v(0, L.sternumBottom[1], 0),
       v(0, nipple, 0),
       v(0, jugular, 0),
@@ -92,6 +95,35 @@ export function levelPosition(L, level) {
 }
 
 /**
+ * 把每一把骨度尺投影到對應的體軸段上，換算成「第 n 寸落在段內的哪個參數 t」。
+ *
+ * 骨度標誌（外踝尖、髕尖、大轉子）在體表，體軸節點是關節中心，兩者不重合；
+ * 直接拿標誌當射線起點會讓穴位偏到骨頭外面。所以標誌只當尺規用：
+ * 先把兩端投影到體軸段得到 t0／t1，再依寸數在 t0–t1 之間內插。
+ */
+function cunRulers(L, chains) {
+  const out = {};
+  const _ap = new THREE.Vector3();
+  for (const [key, spec] of Object.entries(BONE_CUN)) {
+    if (!spec.chain || !spec.ruler) continue;
+    const chain = chains[spec.chain];
+    if (!chain) continue;
+    const A = chain[spec.seg], B = chain[spec.seg + 1];
+    // 每一把尺各自留一份段向量：proj 會在 retarget 執行時才被呼叫（from 覆寫起算點），
+    // 共用暫存變數的話拿到的會是迴圈最後一段的值。
+    const ab = new THREE.Vector3().subVectors(B, A);
+    const l2 = Math.max(1e-9, ab.lengthSq());
+    const proj = name => {
+      const q = landmarkOf(L, name);
+      _ap.set(q[0], q[1], q[2]).sub(A);
+      return _ap.dot(ab) / l2;
+    };
+    out[key] = { chain: spec.chain, seg: spec.seg, n: spec.n, t0: proj(spec.ruler[0]), t1: proj(spec.ruler[1]), proj };
+  }
+  return out;
+}
+
+/**
  * 建立 retarget 函式。
  * @param {object} landmarks manifest.landmarks
  * @param {THREE.BufferGeometry} skin 真實體表幾何
@@ -100,6 +132,7 @@ export function levelPosition(L, level) {
 export function makeRetarget(landmarks, skin, lift = 0.005) {
   const T = targetChains(landmarks);
   const keys = Object.keys(SOURCE);
+  const rulers = cunRulers(landmarks, T);
   const intersect = makeSurfaceRay(skin);
   // 由體軸到體表最遠約 0.17 m（軀幹側面）；設 0.28 m 上限，射線就不會穿到身體另一側
   const FAR = 0.28;
@@ -107,6 +140,7 @@ export function makeRetarget(landmarks, skin, lift = 0.005) {
   const _p = new THREE.Vector3(), _ab = new THREE.Vector3(), _ap = new THREE.Vector3();
   const _q = new THREE.Vector3(), _off = new THREE.Vector3(), _dir = new THREE.Vector3();
   const _tab = new THREE.Vector3(), _base = new THREE.Vector3(), _quat = new THREE.Quaternion();
+  const _axis = new THREE.Vector3();
 
   const _mapped = new THREE.Vector3();
 
@@ -119,9 +153,12 @@ export function makeRetarget(landmarks, skin, lift = 0.005) {
    *            穴位本來就在皮膚上，用預設的 Infinity；經絡走行的空中補間點才需要限制。
    *   allow    限定可用的體軸。胸腹背的穴位在幾何上常常離手臂體軸更近（例如淵腋、
    *            天池、大包），不限定就會被判給手臂、射線往內穿過整個身體打到對側。
+   *   cun      { seg, n }：四肢穴位改用骨度分寸定位。seg 是 data/cun.js 的尺，
+   *            n 是「從尺的遠端標誌往近端量幾寸」（腕橫紋上 7 寸 → forearm / 7）。
+   *            座標本身只用來決定橫向偏移的方向，沿骨長軸的位置一律由寸數決定。
    */
   return function retarget(pos, opts = {}) {
-    const { level = null, lat = null, maxShift = Infinity, allow = null } = opts;
+    const { level = null, lat = null, maxShift = Infinity, allow = null, cun = null } = opts;
     _p.set(pos[0], pos[1], pos[2]);
 
     // 1. 找出最近的來源體軸段
@@ -160,10 +197,28 @@ export function makeRetarget(landmarks, skin, lift = 0.005) {
     // 4. 椎體特例。這些穴位的定義是「第 n 椎棘突下、旁開幾寸」，
     //    用角度去推會被真實背部的深度放大（膏肓會跑到肩胛骨外面），
     //    所以直接用真實棘突高度 + 真實骨度分寸算出側方距離，再往後打到背部皮膚。
+    // 4a. 骨度分寸特例：沿骨長軸的位置改由寸數決定，橫向偏移的方向沿用上面算出來的 _dir，
+    //     實際落點仍由射線打到體表決定，所以偏移量本身不需要再縮放。
+    const ruler = cun && rulers[cun.seg];
+    if (ruler) {
+      const tA = T[ruler.chain][ruler.seg], tB = T[ruler.chain][ruler.seg + 1];
+      const perCun = (ruler.t1 - ruler.t0) / ruler.n;
+      // 起算點預設是尺的遠端標誌；有些穴位的教科書定義換了一個標誌
+      //（伏兔、血海從「髕底」往上量），但仍沿用同一段骨度的 1 寸長度。
+      const from = cun.from ? ruler.proj(cun.from) : ruler.t1;
+      _base.copy(tA).lerp(tB, from - perCun * cun.n);
+      // 偏移方向只留橫向分量。來源座標的偏移已經含了「在關節中心上方／下方」的資訊，
+      // 基準點又照寸數移動過一次，兩者相加會重複計算——崑崙會被拉到腳底板去。
+      _axis.subVectors(tB, tA).normalize();
+      _dir.addScaledVector(_axis, -_dir.dot(_axis));
+      if (_dir.lengthSq() < 1e-6) _dir.subVectors(_p, _q).addScaledVector(_axis, 0);   // 近乎純軸向時退回原偏移
+      _dir.normalize();
+    }
+
     const lv = level && levelPosition(landmarks, level);
     if (lv) {
-      const cun = lat != null ? lat : Math.abs(pos[0]) / SOURCE_CUN_BACK;
-      _base.set(cun * (landmarks.cunBack || 0.021), lv.y, 0.02);
+      const lateral = lat != null ? lat : Math.abs(pos[0]) / SOURCE_CUN_BACK;
+      _base.set(lateral * (landmarks.cunBack || 0.021), lv.y, 0.02);
       _dir.set(0, 0, -1);
     }
 

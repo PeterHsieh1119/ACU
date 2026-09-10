@@ -5,6 +5,8 @@ import { MUSCLES, MUSCLE_GROUPS } from '../data/muscles.js';
 import { PNF_PATTERNS, PNF_REGIONS } from '../data/pnf.js';
 import { NERVES, NERVE_GROUPS } from '../data/nerves.js';
 import { VESSELS, VESSEL_GROUPS, VESSEL_KINDS } from '../data/vessels.js';
+import { LOCATE } from '../data/locate.js';
+import { BONE_CUN, FINGER_CUN, cunScale } from '../data/cun.js';
 import { buildBody, makeSnapper, bodyAxisPoint } from './body.js';
 import { loadAnatomy, mirrorGeometry } from './anatomy.js';
 import { makeRetarget, makeAxisPoint, makeSkinClamp } from './retarget.js';
@@ -132,10 +134,17 @@ const CHAINS_BY_REGION = {
   upper: ['arm'], lower: ['leg', 'foot'],
 };
 
+// 本模型每一段骨度的 1 寸有多長；沒有真實解剖資料時（示意模型）就沒有骨度尺可算
+const CUN_SCALE = anatomy ? cunScale(anatomy.landmarks) : {};
+
 // 穴位落到體表；bilateral 的另一側直接鏡射（模型左右對稱）
 const snapped = new Map();          // pointId -> { p:[x,y,z], n:[x,y,z] }（+x 側）
 for (const pt of POINTS) {
-  snapped.set(pt.id, placePoint(pt.pos, { level: pt.level, lat: pt.lat, allow: CHAINS_BY_REGION[pt.region] }));
+  const loc = LOCATE[pt.id];
+  snapped.set(pt.id, placePoint(pt.pos, {
+    level: pt.level, lat: pt.lat, allow: CHAINS_BY_REGION[pt.region],
+    cun: (anatomy && loc && loc.cun) || null,
+  }));
 }
 
 const pointById = Object.fromEntries(POINTS.map(p => [p.id, p]));
@@ -682,8 +691,38 @@ function bindInfoTags() {
   infoBody.querySelectorAll('[data-ves]').forEach(el => el.onclick = () => selectVessel(el.dataset.ves));
 }
 
+/** 「骨度依據」那一列：本穴用哪一把尺、量到第幾寸、在本模型上等於幾公分 */
+function cunNote(pt) {
+  const c = LOCATE[pt.id] && LOCATE[pt.id].cun;
+  if (c) {
+    const spec = BONE_CUN[c.seg], sc = CUN_SCALE[c.seg];
+    // 尺的名稱寫成「近端→遠端」，量測基準預設是遠端那一頭
+    const base = c.from ? (FROM_LABEL[c.from] || c.from) : spec.name.split('→')[1];
+    const where = c.n === 0 ? `與${base}同高`
+      : `在${base}${c.n > 0 ? '上' : '下'} ${Math.abs(c.n)} 寸`;
+    const cm = sc ? `＝${(Math.abs(c.n) * sc.metres * 100).toFixed(1)} cm（本模型 1 寸 ≈ ${(sc.metres * 100).toFixed(1)} cm）` : '';
+    return `<dt>骨度依據</dt><dd>${esc(spec.name)}＝${spec.n} 寸<br>
+      本穴${esc(where)}${c.n === 0 ? '' : esc(cm)}
+      <span style="color:var(--dim2)">；沿骨長軸的位置由這把尺算出，不是估的。</span></dd>`;
+  }
+  if (pt.level) {
+    return `<dt>骨度依據</dt><dd>${esc(levelLabel(pt.level))}棘突高度${pt.lat ? `，旁開 ${pt.lat} 寸` : '，正中線上'}${
+      CUN_SCALE.back_scapula ? `；背部橫寸 1 寸 ≈ ${(CUN_SCALE.back_scapula.metres * 100).toFixed(1)} cm（肩胛骨內緣到後正中線＝3 寸）` : ''}</dd>`;
+  }
+  return '';
+}
+const FROM_LABEL = { patellaBase: '髕底', patellaApex: '膕橫紋', wrist: '腕橫紋', elbow: '肘橫紋', pubicSymphysis: '恥骨聯合上緣', knee: '股骨內上髁' };
+const NUM = ['', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12'];
+/** 'T7' → '第 7 胸椎'、'S2' → '第 2 骶椎' */
+function levelLabel(level) {
+  const m = /^([CTLS])(\d+)$/.exec(level || '');
+  if (!m) return `第 ${level} 椎`;
+  return `第 ${NUM[+m[2]] || m[2]} ${({ C: '頸椎', T: '胸椎', L: '腰椎', S: '骶椎' })[m[1]]}`;
+}
+
 function showPointInfo(pt) {
   const meta = MERIDIANS[pt.meridian];
+  const loc = LOCATE[pt.id] || { find: '' };
   const nb = neighboursOfPoint(pt.id);
   const sibs = POINTS.filter(p => p.meridian === pt.meridian);
   const i = sibs.indexOf(pt);
@@ -694,6 +733,8 @@ function showPointInfo(pt) {
     ${tags ? `<div>${tags}</div>` : ''}
     <dl>
       <dt>定位</dt><dd>${esc(pt.loc)}</dd>
+      <dt>取穴法</dt><dd>${esc(loc.find)}</dd>
+      ${cunNote(pt)}
       <dt>主治</dt><dd>${esc(pt.ind)}</dd>
       <dt>刺法參考</dt><dd>${esc(pt.depth)}</dd>
       <dt>下方／鄰近肌肉</dt><dd>${musTags(pt.muscles)}</dd>
@@ -1046,6 +1087,31 @@ searchEl.addEventListener('input', () => {
   applyHighlights();
 });
 $('search-clear').onclick = () => { searchEl.value = ''; state.query = ''; renderPointList(); applyHighlights(); };
+
+// --- 骨度分寸表 ---
+function renderCunRef() {
+  const box = $('cunref');
+  const parts = {};
+  for (const [key, spec] of Object.entries(BONE_CUN)) (parts[spec.part] ||= []).push([key, spec]);
+  let html = '';
+  for (const [part, list] of Object.entries(parts)) {
+    html += `<div class="part">${esc(part)}</div>`;
+    for (const [key, spec] of list) {
+      const sc = CUN_SCALE[key];
+      html += `<div class="crow" title="${esc(spec.note || '')}">
+        <span class="cn">${spec.n} 寸</span>
+        <span class="nm">${esc(spec.name)}<span style="color:var(--dim2)"> · ${spec.dir}</span></span>
+        <span class="cm">${sc ? (sc.metres * 100).toFixed(1) + ' cm/寸' : ''}</span>
+      </div>`;
+    }
+  }
+  html += '<div class="note">「寸」是比例不是長度：同一段骨度不論長短一律折成固定等份，'
+    + '所以每段的 1 寸都不一樣長。右欄是本解剖模型換算出來的實際長度。'
+    + '<br><br>手邊沒有標誌可量時用<b>指寸法</b>（用受檢者本人的手指）：<br>'
+    + FINGER_CUN.map(f => `· ${esc(f.name)}＝${f.n} 寸：${esc(f.how)}`).join('<br>')
+    + '</div>';
+  box.innerHTML = html;
+}
 
 // --- 肌肉清單 ---
 const muslist = $('muslist');
@@ -1453,6 +1519,7 @@ renderPointList();
 renderMuscleList();
 renderPnfList();
 renderNerveVesselList();
+renderCunRef();
 applyHighlights();
 resize();
 readHash();

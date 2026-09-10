@@ -408,6 +408,24 @@ function extremeCentroid(names, axis, sign, frac = 0.06) {
   for (let i = 0; i < n; i++) for (let a = 0; a < 3; a++) c[a] += v[i][a];
   return c.map(x => +(x / n).toFixed(4));
 }
+/** 先用 filter 篩掉不要的頂點，再取極端質心；大轉子、恥骨聯合這種要限定區域才抓得到 */
+function extremeCentroidWhere(names, filter, axis, sign, frac = 0.06) {
+  const all = verticesOf(names);
+  const v = all.filter(filter);
+  if (!v.length) throw new Error('篩選後沒有頂點: ' + names.join(', '));
+  v.sort((a, b) => (b[axis] - a[axis]) * sign);
+  const n = Math.max(1, Math.round(v.length * frac));
+  const c = [0, 0, 0];
+  for (let i = 0; i < n; i++) for (let a = 0; a < 3; a++) c[a] += v[i][a];
+  return c.map(x => +(x / n).toFixed(4));
+}
+function bounds1(names, axis) {
+  const v = verticesOf(names);
+  let lo = Infinity, hi = -Infinity;
+  for (const p of v) { if (p[axis] < lo) lo = p[axis]; if (p[axis] > hi) hi = p[axis]; }
+  return [lo, hi];
+}
+
 function centroid(names) {
   const v = verticesOf(names);
   const c = [0, 0, 0];
@@ -454,7 +472,30 @@ const landmarks = {
   sternumTop: extremeCentroid(['body of sternum'], 1, +1, 0.08),
   sternumBottom: extremeCentroid(['body of sternum'], 1, -1, 0.08),
   spinous,
+
+  // ---- 骨度分寸用的骨性標誌 ----
+  // 上面那組體軸節點取的是「關節中心」（肱骨頭頂、股骨頭頂、距骨中心…），
+  // 骨度分寸量的卻是體表摸得到的骨性標誌（外踝尖、髕尖、大轉子…），
+  // 兩者相差 2–5 公分，直接拿關節中心當尺規會讓整段的穴位系統性偏移約 1 寸。
+  lateralMalleolus: extremeCentroid(['fibula'], 1, -1, 0.02),          // 外踝尖
+  medialMalleolus: extremeCentroid(['tibia'], 1, -1, 0.02),            // 內踝尖
+  tibiaCondyle: extremeCentroid(['tibia'], 1, +1, 0.03),               // 脛骨內側髁（陰陵泉高度）
+  patellaApex: extremeCentroid(['patella'], 1, -1, 0.15),              // 髕尖＝膕橫紋高度
+  radialStyloid: extremeCentroid(['radius'], 1, -1, 0.03),             // 橈骨莖突
+  patellaBase: extremeCentroid(['patella'], 1, +1, 0.15),              // 髕底（大腿前面的穴位由此往上量）
+  olecranon: extremeCentroid(['ulna'], 1, +1, 0.03),                   // 鷹嘴（肘尖）
 };
+{
+  const [, femurTop] = bounds1(['femur'], 1);
+  // 大轉子＝股骨近端最外側；不限定高度會被膝部的外髁搶走
+  landmarks.greaterTrochanter = extremeCentroidWhere(['femur'], p => p[1] > femurTop - 0.10, 0, +1, 0.04);
+  // 恥骨聯合上緣＝髖骨最靠正中線那一小撮裡最高的
+  landmarks.pubicSymphysis = extremeCentroidWhere(['hip bone'], p => Math.abs(p[0]) < 0.018, 1, +1, 0.06);
+  // 髂前上棘：髂骨最前上方
+  landmarks.asis = extremeCentroidWhere(['hip bone'], p => p[2] > 0.0, 1, +1, 0.03);
+  // 坐骨結節：髖骨後下方最低處，臀溝的高度參考
+  landmarks.ischialTuberosity = extremeCentroidWhere(['hip bone'], p => p[2] < -0.01, 1, -1, 0.04);
+}
 landmarks.cunBack = +(Math.abs(landmarks.scapulaMedial[0]) / 3).toFixed(4);
 manifest.landmarks = landmarks;
 

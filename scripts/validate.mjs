@@ -10,6 +10,8 @@ import { MUSCLES, MUSCLE_GROUPS } from '../data/muscles.js';
 import { PNF_PATTERNS, PNF_REGIONS } from '../data/pnf.js';
 import { NERVES, NERVE_GROUPS } from '../data/nerves.js';
 import { VESSELS, VESSEL_GROUPS, VESSEL_KINDS } from '../data/vessels.js';
+import { LOCATE } from '../data/locate.js';
+import { BONE_CUN, FINGER_CUN, cunScale, landmarkOf } from '../data/cun.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const problems = [];
@@ -110,6 +112,37 @@ for (const [id, ve] of Object.entries(VESSELS)) {
 }
 ok(`血管 ${Object.keys(VESSELS).length} 條資料完整`);
 
+// ---------- 取穴法與骨度分寸 ----------
+{
+  const extra = Object.keys(LOCATE).filter(k => !ids.has(k));
+  if (extra.length) fail(`data/locate.js 有不存在的穴位 id：${extra.join(', ')}`);
+  let withCun = 0;
+  for (const p of POINTS) {
+    const l = LOCATE[p.id];
+    if (!l) { fail(`${p.id} 缺少取穴法（data/locate.js）`); continue; }
+    if (!l.find || l.find.length < 8) fail(`${p.id} 的取穴法太短或缺漏`);
+    if (!l.cun) continue;
+    withCun++;
+    const spec = BONE_CUN[l.cun.seg];
+    if (!spec) { fail(`${p.id} 的骨度尺不存在：${l.cun.seg}`); continue; }
+    if (!spec.ruler || !spec.chain) fail(`${p.id} 用的骨度尺 ${l.cun.seg} 沒有對應的體軸，無法定位`);
+    // 負數＝往遠端量（照海在內踝尖下 1 寸），但不會超過 3 寸
+    if (!(l.cun.n >= -3)) fail(`${p.id} 的骨度寸數不合法：${l.cun.n}`);
+    if (!l.cun.from && l.cun.n > spec.n) fail(`${p.id} 的 ${l.cun.n} 寸超過 ${spec.name} 的 ${spec.n} 寸`);
+    // 剛好落在尺的兩端（腕橫紋、外踝尖、肘橫紋）本來就不會寫寸數，其餘一定要寫
+    const atEnd = l.cun.n === 0 || l.cun.n === spec.n;
+    if (!atEnd && !/寸/.test(p.loc) && !/寸/.test(l.find)) fail(`${p.id} 有骨度錨點，但定位與取穴法都沒有提到寸數`);
+  }
+  ok(`取穴法 ${POINTS.length} 穴齊全，其中 ${withCun} 穴有骨度分寸錨點`);
+}
+for (const [key, s] of Object.entries(BONE_CUN)) {
+  if (!(s.n > 0)) fail(`骨度 ${key} 缺少寸數`);
+  for (const f of ['part', 'name', 'dir']) if (!s[f]) fail(`骨度 ${key} 缺少 ${f}`);
+  if (s.chain && !s.ruler) fail(`骨度 ${key} 有 chain 卻沒有 ruler`);
+}
+if (FINGER_CUN.length < 3) fail('指寸法資料不足');
+ok(`骨度分寸 ${Object.keys(BONE_CUN).length} 段、指寸法 ${FINGER_CUN.length} 種`);
+
 // ---------- 三層連結 ----------
 const orphan = Object.keys(MUSCLES).filter(id =>
   !POINTS.some(p => p.muscles.includes(id)) && !PNF_PATTERNS.some(p => p.muscles.includes(id)));
@@ -148,6 +181,19 @@ if (fs.existsSync(path.join(anatomyDir, 'manifest.json'))) {
   for (const lv of levels) {
     if (!man.landmarks.spinous[lv] && !/^S[1-4]$/.test(lv)) fail(`穴位用到的椎體 ${lv} 在 manifest 找不到`);
   }
+  // 骨度尺用到的標誌一個都不能少，缺了整段四肢穴位就會定位失敗
+  for (const [key, spec] of Object.entries(BONE_CUN)) {
+    if (!spec.ruler) continue;
+    for (const lm of spec.ruler) {
+      try { landmarkOf(man.landmarks, lm); }
+      catch { fail(`骨度 ${key} 需要的標誌 ${lm} 在 manifest 找不到`); }
+    }
+  }
+  const scale = cunScale(man.landmarks);
+  for (const [key, v] of Object.entries(scale)) {
+    if (!(v.metres > 0.008 && v.metres < 0.05)) fail(`骨度 ${key} 換算出來的 1 寸是 ${(v.metres * 100).toFixed(1)} cm，明顯不合理`);
+  }
+  ok(`骨度尺 ${Object.keys(scale).length} 段可換算（前臂 1 寸 ≈ ${(scale.forearm.metres * 100).toFixed(1)} cm、小腿 ${(scale.shank.metres * 100).toFixed(1)} cm）`);
   ok('骨架 landmark 齊全');
 } else {
   console.log('  · 找不到 data/anatomy/manifest.json，略過解剖資產檢查');
