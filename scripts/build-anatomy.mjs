@@ -13,6 +13,7 @@
 //   data/anatomy/skin.bin.gz     體表
 //   data/anatomy/muscles.bin.gz  肌肉
 //   data/anatomy/bones.bin.gz    骨骼（延遲載入）
+//   data/anatomy/vessels.bin.gz  動脈與靜脈（延遲載入）
 //
 // 座標系與 ACU 相同：公尺、y 向上、+z 為前方、+x 為受檢者左側。
 // 只取單側（左）與正中結構，右側在執行時鏡射，資料量因此少一半。
@@ -119,6 +120,48 @@ const MUSCLE_MAP = {
   fhl_fdl: ['flexor hallucis longus', 'flexor digitorum longus'],
   abductor_hallucis: ['abductor hallucis'],
   plantar_intrinsics: ['flexor digitorum brevis', 'flexor accessorius'],
+};
+
+// ---------------------------------------------------------------
+// 血管圖層：只取臨床上會影響針刺安全或作為體表定位的血管
+// midline 的大血管（主動脈、腔靜脈）貼著正中線但不跨過去，
+// 交給自動判斷會被誤鏡射成「右側也有一條主動脈」，所以明寫。
+// ---------------------------------------------------------------
+const VESSEL_MAP = {
+  aorta:            { kind: 'artery', midline: true, names: ['ascending aorta', 'arch of aorta', 'descending aorta'] },
+  vena_cava:        { kind: 'vein',   midline: true, names: ['superior vena cava', 'inferior vena cava'] },
+
+  common_carotid:   { kind: 'artery', names: ['common carotid artery'] },
+  internal_carotid: { kind: 'artery', names: ['internal carotid artery'] },
+  vertebral_a:      { kind: 'artery', names: ['vertebral artery'] },
+  inferior_thyroid: { kind: 'artery', names: ['inferior thyroid artery'] },
+  subclavian_a:     { kind: 'artery', names: ['subclavian artery'] },
+  axillary_a:       { kind: 'artery', names: ['axillary artery'] },
+  brachial_a:       { kind: 'artery', names: ['brachial artery'] },
+  deep_brachial_a:  { kind: 'artery', names: ['deep brachial artery', 'radial collateral branch of deep brachial artery', 'middle collateral branch of deep brachial artery'] },
+  radial_a:         { kind: 'artery', names: ['radial artery', 'dorsal carpal branch of radial artery'] },
+  ulnar_a:          { kind: 'artery', names: ['ulnar artery', 'dorsal carpal branch of ulnar artery'] },
+  palmar_arch_a:    { kind: 'artery', names: ['superficial palmar arterial arch', 'deep palmar arch', 'palmar metacarpal artery'] },
+
+  iliac_a:          { kind: 'artery', names: ['common iliac artery', 'external iliac artery', 'internal iliac artery'] },
+  femoral_a:        { kind: 'artery', names: ['femoral artery', 'lateral circumflex femoral artery', 'descending branch of lateral circumflex femoral artery'] },
+  popliteal_a:      { kind: 'artery', names: ['popliteal artery'] },
+  anterior_tibial_a:{ kind: 'artery', names: ['anterior tibial artery'] },
+  posterior_tibial_a:{ kind: 'artery', names: ['posterior tibial artery'] },
+  dorsalis_pedis:   { kind: 'artery', names: ['dorsalis pedis artery'] },
+  plantar_a:        { kind: 'artery', names: ['medial plantar artery', 'lateral plantar artery', 'plantar arch', 'deep plantar artery'] },
+
+  internal_jugular: { kind: 'vein',   names: ['internal jugular vein'] },
+  subclavian_v:     { kind: 'vein',   names: ['subclavian vein'] },
+  axillary_v:       { kind: 'vein',   names: ['axillary vein'] },
+  cephalic_v:       { kind: 'vein',   names: ['cephalic vein'] },
+  basilic_v:        { kind: 'vein',   names: ['basilic vein', 'medial brachial vein'] },
+  median_cubital_v: { kind: 'vein',   names: ['median cubital vein', 'median antebrachial vein'] },
+  femoral_v:        { kind: 'vein',   names: ['femoral vein', 'deep femoral vein'] },
+  popliteal_v:      { kind: 'vein',   names: ['popliteal vein'] },
+  great_saphenous:  { kind: 'vein',   names: ['great saphenous vein'] },
+  small_saphenous:  { kind: 'vein',   names: ['small saphenous vein'] },
+  tibial_v:         { kind: 'vein',   names: ['anterior tibial vein', 'posterior tibial vein'] },
 };
 
 // 骨骼圖層：略過牙齒、牙齦、聽小骨等對體表定位沒有幫助的細碎結構
@@ -230,7 +273,7 @@ function compact(pos, idx) {
 // ---------------------------------------------------------------
 // 收集要輸出的部位
 // ---------------------------------------------------------------
-const groups = { skin: [], muscles: [], bones: [] };
+const groups = { skin: [], muscles: [], bones: [], vessels: [] };
 const missing = [];
 
 const skinParts = partsNamed('skin');
@@ -245,6 +288,17 @@ for (const [key, names] of Object.entries(MUSCLE_MAP)) {
   groups.muscles.push({ key, name: names[0], parts, ratio: 0.45, error: 0.02 });
 }
 
+// 血管：管徑細，簡化誤差要小，不然整條會塌成折線
+const missingVessels = [];
+for (const [key, v] of Object.entries(VESSEL_MAP)) {
+  const parts = v.names.flatMap(partsNamed);
+  if (!parts.length) { missingVessels.push(key); continue; }
+  groups.vessels.push({
+    key, name: v.names[0], parts, ratio: 0.6, error: 0.0015,
+    kind: v.kind, forceMirror: v.midline ? false : null,
+  });
+}
+
 // 來源把脛前肌、提肩胛肌等歸在 skeletal，得把已經當肌肉用掉的部位排除，
 // 骨骼層才不會混進肌肉。
 for (const p of atlas.parts) {
@@ -254,6 +308,7 @@ for (const p of atlas.parts) {
 }
 
 console.log('肌肉對應 %d 條，缺 %d 條：%s', groups.muscles.length, missing.length, missing.join(', ') || '無');
+console.log('血管 %d 條，缺 %d 條：%s', groups.vessels.length, missingVessels.length, missingVessels.join(', ') || '無');
 console.log('骨骼 %d 件', groups.bones.length);
 
 // 先跑一遍幾何，同時算全域包圍盒
@@ -280,7 +335,7 @@ fs.mkdirSync(OUT, { recursive: true });
 const manifest = {
   source: 'BodyParts3D 4.0 · The Database Center for Life Science · CC BY 4.0',
   via: 'https://github.com/ashemag/human-atlas',
-  note: '只保留 ACU 需要的體表、肌肉與骨骼，單側資料，執行時鏡射；位置量化為 uint16。',
+  note: '只保留 ACU 需要的體表、肌肉、骨骼與血管，單側資料，執行時鏡射；位置量化為 uint16。',
   quant: { min: qMin, scale: qScale },
   groups: {},
 };
@@ -311,10 +366,11 @@ for (const [g, list] of Object.entries(built)) {
       if (pos[i + a] < bounds[0][a]) bounds[0][a] = pos[i + a];
       if (pos[i + a] > bounds[1][a]) bounds[1][a] = pos[i + a];
     }
-    const mirror = !(minX < -0.02 && maxX > 0.02);
+    const mirror = it.forceMirror != null ? it.forceMirror : !(minX < -0.02 && maxX > 0.02);
     records.push({
       key: it.key, name: it.name, p: offset, i: offset + pb.length + pad, vc, ic, idx32, mirror,
       bounds: bounds.map(b => b.map(v => +v.toFixed(4))),
+      ...(it.kind ? { kind: it.kind } : {}),
     });
     chunks.push(pb);
     if (pad) chunks.push(Buffer.alloc(pad));

@@ -90,6 +90,7 @@ async function loadGroup(manifest, name, onProgress) {
   return group.parts.map(rec => ({
     key: rec.key,
     name: rec.name,
+    kind: rec.kind,
     mirror: rec.mirror,
     bounds: rec.bounds,
     geometry: geometryFromRecord(buffer, rec, manifest.quant),
@@ -98,7 +99,7 @@ async function loadGroup(manifest, name, onProgress) {
 
 /**
  * 只等體表就回傳——體表一到就能畫出人體與穴位。
- * 肌肉（約 0.8 MB）與骨骼（約 0.6 MB）改由呼叫端在背景載入，
+ * 肌肉（約 0.8 MB）、骨骼（約 0.6 MB）與血管（約 0.3 MB）改由呼叫端在背景載入，
  * 不然首次開啟要等 2 MB 下載完才看得到東西。
  * 任何一步失敗都會 reject，呼叫端要能退回內建的示意模型。
  */
@@ -113,5 +114,6 @@ export async function loadAnatomy(onProgress) {
     sizes: Object.fromEntries(Object.entries(manifest.groups).map(([k, g]) => [k, g.gzipBytes])),
     loadMuscles: p => loadGroup(manifest, 'muscles', p).then(list => new Map(list.map(m => [m.key, m]))),
     loadBones: p => loadGroup(manifest, 'bones', p),
+    loadVessels: p => loadGroup(manifest, 'vessels', p),
   };
 }

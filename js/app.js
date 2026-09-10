@@ -3,9 +3,11 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { MERIDIANS, REGIONS, POINTS, ROUTES } from '../data/acupoints.js';
 import { MUSCLES, MUSCLE_GROUPS } from '../data/muscles.js';
 import { PNF_PATTERNS, PNF_REGIONS } from '../data/pnf.js';
+import { NERVES, NERVE_GROUPS } from '../data/nerves.js';
+import { VESSELS, VESSEL_GROUPS, VESSEL_KINDS } from '../data/vessels.js';
 import { buildBody, makeSnapper, bodyAxisPoint } from './body.js';
 import { loadAnatomy, mirrorGeometry } from './anatomy.js';
-import { makeRetarget, makeAxisPoint } from './retarget.js';
+import { makeRetarget, makeAxisPoint, makeSkinClamp } from './retarget.js';
 import { tube } from './geom.js';
 
 const $ = id => document.getElementById(id);
@@ -85,6 +87,7 @@ const bodyGroup = new THREE.Group();
 scene.add(bodyGroup);
 
 let skinMat, placePoint, axisPoint;
+let clampInside = p => p;   // 體內結構專用：把走行點壓回體表以內
 
 if (anatomy) {
   skinMat = new THREE.MeshStandardMaterial({
@@ -107,6 +110,7 @@ if (anatomy) {
   const nearestAxis = makeAxisPoint(anatomy.landmarks);
   placePoint = (pos, opts = {}) => retarget(pos, opts);
   axisPoint = nearestAxis;
+  clampInside = makeSkinClamp(anatomy.landmarks, anatomy.skin.geometry, 0.012);
 } else {
   const built = buildBody();
   bodyGroup.add(built.group);
@@ -317,17 +321,233 @@ function renderMuscles(highlightIds, highlightColor) {
 }
 
 // ============================================================
+// 神經（示意幾何）
+// ============================================================
+// 來源解剖資料的 nervous 系統只有中樞神經與眼眶內的顱神經，四肢的周邊神經完全沒有，
+// 所以這一層一律用走行控制點掃掠成管線，再 retarget 到真實骨架（maxShift 0＝只映射不吸附）。
+// 好處是不用多下載一包資料，代價是位置只到「神經幹大致走在哪裡」的精度。
+const NERVE_CHAINS = {
+  head_neck: ['trunk'], trunk: ['trunk'],
+  upper: ['trunk', 'arm'], lower: ['trunk', 'leg', 'foot'],
+};
+const NRV_BASE = 0xf2d34e, NRV_HL = 0xfff3b0, NRV_SEL = 0xffffff;
+
+const nerveGroup = new THREE.Group();
+scene.add(nerveGroup);
+const nerveMeshes = {};   // id -> { meshes, mat, center }
+
+for (const [id, nv] of Object.entries(NERVES)) {
+  const allow = NERVE_CHAINS[nv.group];
+  const strands = (nv.paths || [nv.path]).map(pts => pts.map(p => clampInside(placePoint(p, { maxShift: 0, allow }).p)));
+  const mat = new THREE.MeshStandardMaterial({
+    color: NRV_BASE, emissive: 0x4a3a00, roughness: 0.45, metalness: 0.0,
+    transparent: true, opacity: 0.95, depthWrite: false,
+  });
+  const center = new THREE.Vector3();
+  let n = 0;
+  const meshes = [];
+  const polylines = [];
+  for (const pts of strands) {
+    for (const side of (nv.midline ? [pts] : [pts, pts.map(p => [-p[0], p[1], p[2]])])) {
+      const curve = new THREE.CatmullRomCurve3(side.map(q => new THREE.Vector3(...q)), false, 'catmullrom', 0.3);
+      const mesh = new THREE.Mesh(tube(side, { r: nv.r, taper: [1, 1], radial: 8, tension: 0.3 }), mat);
+      mesh.visible = false;
+      mesh.userData.nerveId = id;
+      mesh.renderOrder = 1.25;
+      nerveGroup.add(mesh);
+      meshes.push(mesh);
+      // 取樣曲線本身（不是控制點）才問得出「這個穴位離神經幹多遠」
+      polylines.push(curve.getPoints(Math.max(16, side.length * 8)));
+    }
+    for (const p of pts) { center.add(new THREE.Vector3(...p)); n++; }
+  }
+  nerveMeshes[id] = { meshes, mat, polylines, r: nv.r, center: center.multiplyScalar(1 / Math.max(1, n)) };
+}
+
+function renderNerves() {
+  const sel = state.sel.kind === 'nerve' ? state.sel.id : null;
+  const rel = state.sel.kind === 'nerve' ? null : nervesRelatedToSelection();
+  for (const [id, rec] of Object.entries(nerveMeshes)) {
+    const on = id === sel;
+    const hl = !on && rel && rel.has(id);
+    const show = state.showNerves || on || hl;
+    for (const m of rec.meshes) m.visible = show;
+    if (!show) continue;
+    rec.mat.color.setHex(on ? NRV_SEL : hl ? NRV_HL : NRV_BASE);
+    rec.mat.opacity = (on || hl) ? 1 : (state.showNerves ? 0.55 : 0.9);
+  }
+}
+
+// ============================================================
+// 血管（真實網格，打開圖層或選取時才下載）
+// ============================================================
+const vesselGroup = new THREE.Group();
+scene.add(vesselGroup);
+const vesselMeshes = {};   // id -> { meshes, mat, kind, center }
+let vesselAssets = anatomy ? 'idle' : 'none';   // idle | loading | ready | failed | none
+
+const VES_HL = 0xffd166, VES_SEL = 0xffffff;
+const vesselBaseColor = kind => (VESSEL_KINDS[kind] || VESSEL_KINDS.artery).color;
+
+async function ensureVessels() {
+  if (vesselAssets !== 'idle') return vesselAssets === 'ready';
+  vesselAssets = 'loading';
+  setStatus('血管網格載入中…');
+  try {
+    const parts = await anatomy.loadVessels((got, total) => setStatus(`血管網格載入中…${pct(got, total)}`));
+    for (const part of parts) {
+      const meta = VESSELS[part.key];
+      const kind = (meta && meta.kind) || part.kind || 'artery';
+      const mat = new THREE.MeshStandardMaterial({
+        color: vesselBaseColor(kind), emissive: kind === 'artery' ? 0x3a0c08 : 0x081c33,
+        roughness: 0.4, metalness: 0.05, transparent: true, opacity: 0.95, depthWrite: false,
+      });
+      const geos = part.mirror ? [part.geometry, mirrorGeometry(part.geometry)] : [part.geometry];
+      const center = new THREE.Vector3();
+      const meshes = geos.map(geo => {
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.visible = false;
+        mesh.userData.vesselId = part.key;
+        mesh.renderOrder = 1.2;
+        vesselGroup.add(mesh);
+        geo.computeBoundingSphere();
+        return mesh;
+      });
+      // 鏡射的兩份中心會互相抵消成正中線，聚焦時取原始那一份即可
+      center.copy(meshes[0].geometry.boundingSphere.center);
+      // 每 6 個頂點取一個當距離查詢用的點雲：管壁頂點很密，全取只是白花時間
+      const cloud = [];
+      for (const m of meshes) {
+        const a = m.geometry.attributes.position.array;
+        for (let i = 0; i < a.length; i += 18) cloud.push(a[i], a[i + 1], a[i + 2]);
+      }
+      vesselMeshes[part.key] = { meshes, mat, kind, center, cloud: new Float32Array(cloud) };
+    }
+    vesselAssets = 'ready';
+    setStatus('');
+    // 面板上的「鄰近血管」在網格到齊前算不出來，補算一次
+    if (state.sel.kind === 'point') showPointInfo(pointById[state.sel.id]);
+    return true;
+  } catch (err) {
+    console.warn('[ACU] 血管網格載入失敗：', err.message);
+    vesselAssets = 'failed';
+    setStatus('');
+    return false;
+  }
+}
+
+function renderVessels() {
+  const sel = state.sel.kind === 'vessel' ? state.sel.id : null;
+  const rel = state.sel.kind === 'vessel' ? null : vesselsRelatedToSelection();
+  for (const [id, rec] of Object.entries(vesselMeshes)) {
+    const on = id === sel;
+    const hl = !on && rel && rel.has(id);
+    const show = state.showVessels || on || hl;
+    for (const m of rec.meshes) m.visible = show;
+    if (!show) continue;
+    rec.mat.color.setHex(on ? VES_SEL : hl ? VES_HL : vesselBaseColor(rec.kind));
+    rec.mat.opacity = (on || hl) ? 1 : (state.showVessels ? 0.6 : 0.9);
+  }
+}
+
+// ============================================================
+// 幾何鄰近查詢
+// ============================================================
+// 資料裡的 points 是人工整理的「臨床上要注意的組合」，覆蓋不到全部 375 穴。
+// 這裡再用幾何補一層：算穴位到神經走行線／血管網格的最短距離，
+// 把 3 公分內的一併列出來並標上距離。神經幾何是示意的，所以距離只當數量級參考。
+const NEAR_LIMIT = 0.03;
+
+const _na = new THREE.Vector3(), _nb = new THREE.Vector3(), _np = new THREE.Vector3();
+function distToPolyline(pos, pts) {
+  _np.fromArray(pos);
+  let best = Infinity;
+  for (let i = 0; i < pts.length - 1; i++) {
+    _na.copy(pts[i]); _nb.subVectors(pts[i + 1], _na);
+    const l2 = _nb.lengthSq();
+    const t = l2 < 1e-12 ? 0 : Math.max(0, Math.min(1, _np.clone().sub(_na).dot(_nb) / l2));
+    const d = _na.addScaledVector(_nb, t).distanceToSquared(_np);
+    if (d < best) best = d;
+  }
+  return Math.sqrt(best);
+}
+
+function nearbyNerves(pos) {
+  const out = [];
+  for (const [id, rec] of Object.entries(nerveMeshes)) {
+    let best = Infinity;
+    for (const pl of rec.polylines) best = Math.min(best, distToPolyline(pos, pl) - rec.r);
+    if (best <= NEAR_LIMIT) out.push({ id, d: Math.max(0, best) });
+  }
+  return out.sort((a, b) => a.d - b.d);
+}
+
+function nearbyVessels(pos) {
+  const out = [];
+  for (const [id, rec] of Object.entries(vesselMeshes)) {
+    const c = rec.cloud;
+    let best = Infinity;
+    for (let i = 0; i < c.length; i += 3) {
+      const dx = c[i] - pos[0], dy = c[i + 1] - pos[1], dz = c[i + 2] - pos[2];
+      const d = dx * dx + dy * dy + dz * dz;
+      if (d < best) best = d;
+    }
+    best = Math.sqrt(best);
+    if (best <= NEAR_LIMIT) out.push({ id, d: best });
+  }
+  return out.sort((a, b) => a.d - b.d);
+}
+
+// ============================================================
+// 反查索引：穴位 / 肌肉 → 神經、血管
+// ============================================================
+const nervesOfPoint = {}, nervesOfMuscle = {}, vesselsOfPoint = {};
+for (const [id, nv] of Object.entries(NERVES)) {
+  for (const p of nv.points) (nervesOfPoint[p] ||= []).push(id);
+  for (const m of nv.muscles) (nervesOfMuscle[m] ||= []).push(id);
+}
+for (const [id, ve] of Object.entries(VESSELS)) {
+  for (const p of ve.points) (vesselsOfPoint[p] ||= []).push(id);
+}
+const nervesOfPattern = pat => [...new Set(pat.muscles.flatMap(m => nervesOfMuscle[m] || []))];
+
+/** 穴位的鄰近結構＝人工整理的組合 ∪ 幾何 3 公分內的；回傳已排序、標好距離的清單 */
+const _nbCache = new Map();
+function neighboursOfPoint(id) {
+  const key = id + '|' + vesselAssets;
+  let hit = _nbCache.get(key);
+  if (hit) return hit;
+  const pos = snapped.get(id).p;
+  const curatedN = new Set(nervesOfPoint[id] || []);
+  const curatedV = new Set(vesselsOfPoint[id] || []);
+  const near = new Map(nearbyNerves(pos).map(x => [x.id, x.d]));
+  const nearV = new Map(nearbyVessels(pos).map(x => [x.id, x.d]));
+  const merge = (curated, dists, all) => [
+    ...[...curated].map(k => ({ id: k, d: dists.get(k), curated: true })),
+    ...[...dists.keys()].filter(k => !curated.has(k)).map(k => ({ id: k, d: dists.get(k), curated: false })),
+  ].filter(x => all[x.id]).sort((a, b) => (b.curated - a.curated) || ((a.d ?? 9) - (b.d ?? 9)));
+  hit = { nerves: merge(curatedN, near, NERVES), vessels: merge(curatedV, nearV, VESSELS) };
+  _nbCache.set(key, hit);
+  return hit;
+}
+const pointsOfNerve = id => NERVES[id].points.map(p => pointById[p]).filter(Boolean);
+const pointsOfVessel = id => VESSELS[id].points.map(p => pointById[p]).filter(Boolean);
+
+// ============================================================
 // 狀態
 // ============================================================
 const state = {
-  sel: { kind: null, id: null },        // 'point' | 'muscle' | 'pattern'
+  sel: { kind: null, id: null },        // 'point' | 'muscle' | 'pattern' | 'nerve' | 'vessel'
   meriVisible: Object.fromEntries(Object.keys(MERIDIANS).map(k => [k, true])),
   regions: new Set(),                   // 空集合 = 全部
   query: '',
   mquery: '',
+  nquery: '',
   showRoutes: true,
   showLabels: false,
   showAllMuscles: false,
+  showNerves: false,
+  showVessels: false,
 };
 
 const pointsOfPattern = pat => POINTS.filter(pt => pt.muscles.some(m => pat.muscles.includes(m)));
@@ -350,6 +570,20 @@ function filteredPoints() { return POINTS.filter(passesFilter); }
 // ============================================================
 // 高亮
 // ============================================================
+/** 目前選取的東西「牽涉到哪些神經 / 血管」，用來在 3D 場景裡一併點亮 */
+function nervesRelatedToSelection() {
+  const { kind, id } = state.sel;
+  if (kind === 'point') return new Set(neighboursOfPoint(id).nerves.map(x => x.id));
+  if (kind === 'muscle') return new Set(nervesOfMuscle[id] || []);
+  if (kind === 'pattern') return new Set(nervesOfPattern(patternById[id]));
+  return null;
+}
+function vesselsRelatedToSelection() {
+  const { kind, id } = state.sel;
+  if (kind === 'point') return new Set(neighboursOfPoint(id).vessels.map(x => x.id));
+  return null;
+}
+
 function relatedSets() {
   const { kind, id } = state.sel;
   if (kind === 'pattern') {
@@ -362,6 +596,12 @@ function relatedSets() {
   if (kind === 'point') {
     const pt = pointById[id];
     return { points: new Set([id]), muscles: pt.muscles, color: MUS_HL };
+  }
+  if (kind === 'nerve') {
+    return { points: new Set(NERVES[id].points), muscles: NERVES[id].muscles, color: MUS_HL };
+  }
+  if (kind === 'vessel') {
+    return { points: new Set(VESSELS[id].points), muscles: [], color: MUS_HL };
   }
   return { points: new Set(), muscles: [], color: MUS_HL };
 }
@@ -380,6 +620,8 @@ function applyHighlights() {
   ptMesh.instanceColor.needsUpdate = true;
 
   renderMuscles(rel.muscles, rel.color);
+  renderNerves();
+  renderVessels();
 
   for (const [k, g] of Object.entries(routeGroups)) g.visible = state.showRoutes && state.meriVisible[k];
   labelsDirty = true;
@@ -414,14 +656,35 @@ function ptTags(list, limit = 40) {
   return shown.map(p => `<span class="tag pt" data-pt="${p.id}">${esc(p.name)}</span>`).join('') + more;
 }
 
+const cm = d => (d == null ? '' : `<span class="dist">${d < 0.005 ? '貼近' : (d * 100).toFixed(1) + ' cm'}</span>`);
+
+function nrvTags(list, empty = '無對應資料') {
+  if (!list || !list.length) return `<span style="color:var(--dim2)">${empty}</span>`;
+  return list.map(x => {
+    const id = typeof x === 'string' ? x : x.id;
+    return `<span class="tag nrv" data-nrv="${id}">${esc(NERVES[id].name)}${typeof x === 'string' ? '' : cm(x.d)}</span>`;
+  }).join('');
+}
+function vesTags(list, empty = '無鄰近的主要血管') {
+  if (!list || !list.length) return `<span style="color:var(--dim2)">${empty}</span>`;
+  return list.map(x => {
+    const id = typeof x === 'string' ? x : x.id;
+    const v = VESSELS[id];
+    return `<span class="tag ves ${v.kind}" data-ves="${id}">${esc(v.name)}${typeof x === 'string' ? '' : cm(x.d)}</span>`;
+  }).join('');
+}
+
 function bindInfoTags() {
   infoBody.querySelectorAll('[data-mus]').forEach(el => el.onclick = () => selectMuscle(el.dataset.mus));
   infoBody.querySelectorAll('[data-pat]').forEach(el => el.onclick = () => selectPattern(el.dataset.pat));
   infoBody.querySelectorAll('[data-pt]').forEach(el => el.onclick = () => selectPoint(el.dataset.pt));
+  infoBody.querySelectorAll('[data-nrv]').forEach(el => el.onclick = () => selectNerve(el.dataset.nrv));
+  infoBody.querySelectorAll('[data-ves]').forEach(el => el.onclick = () => selectVessel(el.dataset.ves));
 }
 
 function showPointInfo(pt) {
   const meta = MERIDIANS[pt.meridian];
+  const nb = neighboursOfPoint(pt.id);
   const sibs = POINTS.filter(p => p.meridian === pt.meridian);
   const i = sibs.indexOf(pt);
   const tags = (pt.tags || []).map(t => `<span class="tag attr">${esc(t)}</span>`).join('');
@@ -434,13 +697,16 @@ function showPointInfo(pt) {
       <dt>主治</dt><dd>${esc(pt.ind)}</dd>
       <dt>刺法參考</dt><dd>${esc(pt.depth)}</dd>
       <dt>下方／鄰近肌肉</dt><dd>${musTags(pt.muscles)}</dd>
+      <dt>鄰近神經</dt><dd>${nrvTags(nb.nerves)}</dd>
+      <dt>鄰近血管</dt><dd>${vesTags(nb.vessels, vesselAssets === 'ready' ? '3 公分內沒有列入的主要血管' : '打開「血管」圖層後才會計算')}</dd>
       <dt>相關 PNF 模式（共用肌肉）</dt><dd>${pnfTags(patternsOfPoint(pt))}</dd>
     </dl>
     <div class="navrow">
       <button data-nav="prev" ${i <= 0 ? 'disabled' : ''}>← ${i > 0 ? esc(sibs[i - 1].name) : '—'}</button>
       <button data-nav="next" ${i >= sibs.length - 1 ? 'disabled' : ''}>${i < sibs.length - 1 ? esc(sibs[i + 1].name) : '—'} →</button>
     </div>
-    <div class="warn">座標為示意近似、深度為教科書參考值，僅供學習，不可作為臨床操作依據。</div>`;
+    <div class="warn">座標為示意近似、深度為教科書參考值，僅供學習，不可作為臨床操作依據。
+      標了距離的項目是由模型幾何算出的「3 公分內」結構，神經幾何為示意走行，距離只作數量級參考。</div>`;
   infoEl.classList.add('show');
   infoEl.scrollTop = 0;
   bindInfoTags();
@@ -459,7 +725,7 @@ function showMuscleInfo(id) {
       <dt>起點</dt><dd>${esc(mu.origin)}</dd>
       <dt>止點</dt><dd>${esc(mu.insertion)}</dd>
       <dt>作用</dt><dd>${esc(mu.action)}</dd>
-      <dt>神經支配</dt><dd>${esc(mu.nerve)}</dd>
+      <dt>神經支配</dt><dd>${esc(mu.nerve)}${(nervesOfMuscle[id] || []).length ? `<div style="margin-top:5px">${nrvTags(nervesOfMuscle[id])}</div>` : ''}</dd>
       <dt>其上／鄰近穴位</dt><dd>${ptTags(pointsOfMuscle(id))}</dd>
       <dt>參與的 PNF 模式</dt><dd>${pnfTags(patternsOfMuscle(id))}</dd>
     </dl>
@@ -485,9 +751,50 @@ function showPatternInfo(pat) {
       ${pat.clinical ? `<dt>功能與臨床</dt><dd>${esc(pat.clinical)}</dd>` : ''}
       ${pat.technique ? `<dt>常用技術</dt><dd>${esc(pat.technique)}</dd>` : ''}
       <dt>主要肌肉成分</dt><dd>${musTags(pat.muscles)}</dd>
+      <dt>支配神經</dt><dd>${nrvTags(nervesOfPattern(pat))}</dd>
       <dt>建議參考穴位（位於模式肌肉鏈上）</dt><dd>${ptTags(pointsOfPattern(pat))}</dd>
     </dl>
     <div class="warn">肌肉成分整理自 Voss/Knott 傳統與《PNF in Practice》；穴位建議由「穴位–肌肉」對應自動推得，供選穴思路參考，非治療處方。</div>`;
+  infoEl.classList.add('show');
+  infoEl.scrollTop = 0;
+  bindInfoTags();
+}
+
+function showNerveInfo(id) {
+  const nv = NERVES[id];
+  infoBody.innerHTML = `
+    <h2>${esc(nv.name)}</h2>
+    <div class="sub" style="color:${hex(NRV_BASE)}">${esc(nv.latin)} · ${esc(nv.roots)} · ${NERVE_GROUPS[nv.group] || ''}</div>
+    <dl>
+      <dt>走行</dt><dd>${esc(nv.course)}</dd>
+      <dt>支配</dt><dd>${esc(nv.supply)}</dd>
+      <dt>支配肌肉</dt><dd>${nv.muscles.length ? musTags(nv.muscles) : '<span style="color:var(--dim2)">純感覺神經，無運動支配</span>'}</dd>
+      <dt>走行上／鄰近穴位</dt><dd>${ptTags(pointsOfNerve(id))}</dd>
+      <dt>相關 PNF 模式</dt><dd>${pnfTags(PNF_PATTERNS.filter(p => p.muscles.some(m => nv.muscles.includes(m))))}</dd>
+      <dt>針刺注意</dt><dd>${esc(nv.caution)}</dd>
+    </dl>
+    <div class="warn">⚠ 來源解剖資料（BodyParts3D）未收錄四肢周邊神經，此處的走行是依解剖描述繪製的<b>示意管線</b>，
+      代表神經幹大致經過的區域，不是斷層重建，不可用於判斷實際穿刺路徑。</div>`;
+  infoEl.classList.add('show');
+  infoEl.scrollTop = 0;
+  bindInfoTags();
+}
+
+function showVesselInfo(id) {
+  const ve = VESSELS[id];
+  const kind = VESSEL_KINDS[ve.kind];
+  infoBody.innerHTML = `
+    <h2>${esc(ve.name)}</h2>
+    <div class="sub" style="color:${hex(kind.color)}">${esc(ve.latin)} · ${kind.name} · ${VESSEL_GROUPS[ve.group] || ''}</div>
+    <dl>
+      <dt>走行</dt><dd>${esc(ve.course)}</dd>
+      <dt>鄰近穴位</dt><dd>${ptTags(pointsOfVessel(id))}</dd>
+      <dt>針刺注意</dt><dd>${esc(ve.caution)}</dd>
+    </dl>
+    <div class="warn">${vesselAssets === 'ready'
+      ? '幾何取自 BodyParts3D 解剖模型（CC BY 4.0），為教學用簡化網格。'
+      : vesselAssets === 'loading' ? '血管網格載入中…'
+        : '血管網格尚未載入或載入失敗，僅顯示文字資料。'}</div>`;
   infoEl.classList.add('show');
   infoEl.scrollTop = 0;
   bindInfoTags();
@@ -533,6 +840,40 @@ function selectPattern(id, opts = {}) {
   applyHighlights();
   showPatternInfo(pat);
   if (opts.focus === true) focusHome();
+  writeHash();
+  closeDrawerOnMobile();
+}
+
+function selectNerve(id, opts = {}) {
+  if (!NERVES[id]) return;
+  state.sel = { kind: 'nerve', id };
+  switchTab('pane-nv');
+  syncSidebarSelection();
+  applyHighlights();
+  showNerveInfo(id);
+  if (opts.focus !== false) focusOnVector(nerveMeshes[id].center.clone(), 0.8);
+  writeHash();
+  closeDrawerOnMobile();
+}
+
+function selectVessel(id, opts = {}) {
+  if (!VESSELS[id]) return;
+  state.sel = { kind: 'vessel', id };
+  switchTab('pane-nv');
+  syncSidebarSelection();
+  applyHighlights();
+  showVesselInfo(id);
+  // 網格是延遲下載的，到了再補畫、補聚焦
+  if (vesselAssets === 'idle') {
+    ensureVessels().then(ok => {
+      if (!ok || state.sel.kind !== 'vessel' || state.sel.id !== id) { if (ok) applyHighlights(); return; }
+      applyHighlights();
+      showVesselInfo(id);
+      if (opts.focus !== false) focusOnVector(vesselMeshes[id].center.clone(), 0.8);
+    });
+  } else if (opts.focus !== false && vesselMeshes[id]) {
+    focusOnVector(vesselMeshes[id].center.clone(), 0.8);
+  }
   writeHash();
   closeDrawerOnMobile();
 }
@@ -763,10 +1104,67 @@ function renderPnfList() {
 }
 $('pnfclear').onclick = () => { if (state.sel.kind === 'pattern') closeInfo(); };
 
+// --- 神經與血管清單 ---
+const nvlist = $('nvlist');
+function renderNerveVesselList() {
+  const q = state.nquery;
+  const hit = (...fields) => !q || fields.join(' ').toLowerCase().includes(q);
+  nvlist.innerHTML = '';
+  let total = 0;
+
+  for (const [gk, gname] of Object.entries(NERVE_GROUPS)) {
+    const items = Object.entries(NERVES).filter(([, nv]) => nv.group === gk && hit(nv.name, nv.latin, nv.roots, nv.supply, nv.caution));
+    if (!items.length) continue;
+    total += items.length;
+    const d = document.createElement('details');
+    d.className = 'group';
+    d.open = true;
+    d.innerHTML = `<summary>神經 · ${gname}<span class="sp" style="color:var(--dim2);font-size:10.5px">${items.length}</span></summary>`;
+    for (const [id, nv] of items) {
+      const row = document.createElement('div');
+      row.className = 'prow' + (state.sel.kind === 'nerve' && state.sel.id === id ? ' sel' : '');
+      row.dataset.nrv = id;
+      row.innerHTML = `<span class="mdot" style="background:${hex(NRV_BASE)}"></span><span class="nm">${esc(nv.name)}</span>
+        <span class="mer" style="color:var(--dim2);font-size:10px">${esc(nv.roots)}</span>`;
+      row.onclick = () => selectNerve(id);
+      d.appendChild(row);
+    }
+    nvlist.appendChild(d);
+  }
+
+  for (const [gk, gname] of Object.entries(VESSEL_GROUPS)) {
+    const items = Object.entries(VESSELS).filter(([, ve]) => ve.group === gk && hit(ve.name, ve.latin, ve.course, ve.caution));
+    if (!items.length) continue;
+    total += items.length;
+    const d = document.createElement('details');
+    d.className = 'group';
+    d.open = true;
+    d.innerHTML = `<summary>血管 · ${gname}<span class="sp" style="color:var(--dim2);font-size:10.5px">${items.length}</span></summary>`;
+    for (const [id, ve] of items) {
+      const row = document.createElement('div');
+      row.className = 'prow' + (state.sel.kind === 'vessel' && state.sel.id === id ? ' sel' : '');
+      row.dataset.ves = id;
+      row.innerHTML = `<span class="mdot" style="background:${hex(VESSEL_KINDS[ve.kind].color)}"></span><span class="nm">${esc(ve.name)}</span>
+        <span class="mer" style="color:var(--dim2);font-size:10px">${VESSEL_KINDS[ve.kind].name}</span>`;
+      row.onclick = () => selectVessel(id);
+      d.appendChild(row);
+    }
+    nvlist.appendChild(d);
+  }
+
+  if (!total) nvlist.innerHTML = '<div class="empty">沒有符合條件的神經或血管</div>';
+}
+const nsearchEl = $('nsearch');
+nsearchEl.addEventListener('input', () => { state.nquery = nsearchEl.value.trim().toLowerCase(); renderNerveVesselList(); });
+$('nsearch-clear').onclick = () => { nsearchEl.value = ''; state.nquery = ''; renderNerveVesselList(); };
+$('nvclear').onclick = () => { if (state.sel.kind === 'nerve' || state.sel.kind === 'vessel') closeInfo(); };
+
 function syncSidebarSelection() {
   document.querySelectorAll('.prow[data-pt]').forEach(r => r.classList.toggle('sel', state.sel.kind === 'point' && r.dataset.pt === state.sel.id));
   document.querySelectorAll('.prow[data-mus]').forEach(r => r.classList.toggle('sel', state.sel.kind === 'muscle' && r.dataset.mus === state.sel.id));
   document.querySelectorAll('.pnfbtn').forEach(b => b.classList.toggle('sel', state.sel.kind === 'pattern' && b.dataset.pat === state.sel.id));
+  document.querySelectorAll('.prow[data-nrv]').forEach(r => r.classList.toggle('sel', state.sel.kind === 'nerve' && r.dataset.nrv === state.sel.id));
+  document.querySelectorAll('.prow[data-ves]').forEach(r => r.classList.toggle('sel', state.sel.kind === 'vessel' && r.dataset.ves === state.sel.id));
   const row = ptlist.querySelector('.prow.sel');
   if (row) row.scrollIntoView({ block: 'nearest' });
 }
@@ -782,6 +1180,22 @@ $('op-slider').addEventListener('input', e => {
 $('tg-routes').addEventListener('change', e => { state.showRoutes = e.target.checked; applyHighlights(); });
 $('tg-labels').addEventListener('change', e => { state.showLabels = e.target.checked; labelsDirty = true; });
 $('tg-allmus').addEventListener('change', e => { state.showAllMuscles = e.target.checked; applyHighlights(); });
+
+$('tg-nerves').addEventListener('change', e => { state.showNerves = e.target.checked; applyHighlights(); });
+
+// 血管網格是額外的一包資料，第一次打開才下載
+const vesselToggle = $('tg-vessels');
+if (!anatomy) { vesselToggle.disabled = true; vesselToggle.parentElement.style.opacity = 0.4; }
+vesselToggle.addEventListener('change', async e => {
+  state.showVessels = e.target.checked;
+  applyHighlights();
+  if (!state.showVessels || vesselAssets !== 'idle') return;
+  vesselToggle.parentElement.style.opacity = 0.55;
+  const ok = await ensureVessels();
+  vesselToggle.parentElement.style.opacity = '';
+  if (!ok) { vesselToggle.checked = false; state.showVessels = false; }
+  applyHighlights();
+});
 
 // 骨骼是額外的一包資料，第一次打開才下載
 let bonesGroup = null, bonesLoading = false;
@@ -869,20 +1283,27 @@ function pickPoint(clientX, clientY, radiusPx) {
   return best;
 }
 
+// 穴位優先（螢幕空間、命中範圍較寬），再對目前可見的肌肉／神經／血管做一次射線求交，
+// 取最近的那一個——三層疊在一起時才不會永遠只點到肌肉。
 function pick(clientX, clientY, radiusPx = 15) {
   const i = pickPoint(clientX, clientY, radiusPx);
   if (i >= 0) return { kind: 'point', id: instances[i].pointId };
 
-  const visibleMuscles = muscleGroup.children.filter(m => m.visible);
-  if (visibleMuscles.length) {
-    const rect = renderer.domElement.getBoundingClientRect();
-    ndc.x = ((clientX - rect.left) / rect.width) * 2 - 1;
-    ndc.y = -((clientY - rect.top) / rect.height) * 2 + 1;
-    raycaster.setFromCamera(ndc, camera);
-    const hits = raycaster.intersectObjects(visibleMuscles, false);
-    if (hits.length) return { kind: 'muscle', id: hits[0].object.userData.muscleId };
+  const targets = [];
+  for (const g of [muscleGroup, nerveGroup, vesselGroup]) {
+    for (const m of g.children) if (m.visible) targets.push(m);
   }
-  return null;
+  if (!targets.length) return null;
+  const rect = renderer.domElement.getBoundingClientRect();
+  ndc.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+  ndc.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(ndc, camera);
+  const hits = raycaster.intersectObjects(targets, false);
+  if (!hits.length) return null;
+  const { userData: u } = hits[0].object;
+  if (u.nerveId) return { kind: 'nerve', id: u.nerveId };
+  if (u.vesselId) return { kind: 'vessel', id: u.vesselId };
+  return { kind: 'muscle', id: u.muscleId };
 }
 
 const dom = renderer.domElement;
@@ -893,6 +1314,8 @@ dom.addEventListener('pointerup', e => {
   const hit = pick(e.clientX, e.clientY, e.pointerType === 'touch' ? 26 : 15);
   if (!hit) return;
   if (hit.kind === 'point') selectPoint(hit.id, { focus: false });
+  else if (hit.kind === 'nerve') selectNerve(hit.id, { focus: false });
+  else if (hit.kind === 'vessel') selectVessel(hit.id, { focus: false });
   else selectMuscle(hit.id, { focus: false });
 });
 let hoverPending = null;
@@ -911,9 +1334,11 @@ function doHover(cx, cy) {
   if (!hit) { tooltip.style.display = 'none'; hoverKey = null; return; }
   if (k !== hoverKey) {
     hoverKey = k;
-    tooltip.innerHTML = hit.kind === 'point'
-      ? `${esc(pointById[hit.id].name)}<span class="sub">${esc(pointById[hit.id].code)}</span>`
-      : `${esc(MUSCLES[hit.id].name)}<span class="sub">${esc(MUSCLES[hit.id].latin)}</span>`;
+    const meta = hit.kind === 'point' ? [pointById[hit.id].name, pointById[hit.id].code]
+      : hit.kind === 'nerve' ? [NERVES[hit.id].name, NERVES[hit.id].roots]
+        : hit.kind === 'vessel' ? [VESSELS[hit.id].name, VESSEL_KINDS[VESSELS[hit.id].kind].name]
+          : [MUSCLES[hit.id].name, MUSCLES[hit.id].latin];
+    tooltip.innerHTML = `${esc(meta[0])}<span class="sub">${esc(meta[1])}</span>`;
   }
   const rect = dom.getBoundingClientRect();
   tooltip.style.display = 'block';
@@ -1002,16 +1427,20 @@ function updateLabels() {
 // ============================================================
 function writeHash() {
   const { kind, id } = state.sel;
-  const h = kind === 'point' ? `#p=${id}` : kind === 'muscle' ? `#m=${id}` : kind === 'pattern' ? `#f=${id}` : '';
+  const h = kind === 'point' ? `#p=${id}` : kind === 'muscle' ? `#m=${id}`
+    : kind === 'pattern' ? `#f=${id}` : kind === 'nerve' ? `#n=${id}`
+      : kind === 'vessel' ? `#v=${id}` : '';
   history.replaceState(null, '', h || location.pathname + location.search);
 }
 function readHash() {
-  const m = location.hash.match(/^#(p|m|f)=(.+)$/);
+  const m = location.hash.match(/^#(p|m|f|n|v)=(.+)$/);
   if (!m) return false;
   const id = decodeURIComponent(m[2]);
   if (m[1] === 'p' && pointById[id]) { selectPoint(id); return true; }
   if (m[1] === 'm' && MUSCLES[id]) { selectMuscle(id); return true; }
   if (m[1] === 'f' && patternById[id]) { selectPattern(id); return true; }
+  if (m[1] === 'n' && NERVES[id]) { selectNerve(id); return true; }
+  if (m[1] === 'v' && VESSELS[id]) { selectVessel(id); return true; }
   return false;
 }
 window.addEventListener('hashchange', readHash);
@@ -1023,6 +1452,7 @@ renderRegionChips();
 renderPointList();
 renderMuscleList();
 renderPnfList();
+renderNerveVesselList();
 applyHighlights();
 resize();
 readHash();

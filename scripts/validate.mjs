@@ -8,6 +8,8 @@ import { fileURLToPath } from 'node:url';
 import { POINTS, ROUTES, MERIDIANS, REGIONS } from '../data/acupoints.js';
 import { MUSCLES, MUSCLE_GROUPS } from '../data/muscles.js';
 import { PNF_PATTERNS, PNF_REGIONS } from '../data/pnf.js';
+import { NERVES, NERVE_GROUPS } from '../data/nerves.js';
+import { VESSELS, VESSEL_GROUPS, VESSEL_KINDS } from '../data/vessels.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const problems = [];
@@ -76,6 +78,38 @@ for (const pat of PNF_PATTERNS) {
 }
 ok(`PNF ${PNF_PATTERNS.length} 個模式資料完整`);
 
+// ---------- 神經 ----------
+for (const [id, nv] of Object.entries(NERVES)) {
+  if (!NERVE_GROUPS[nv.group]) fail(`神經 ${id} 的分組不存在：${nv.group}`);
+  const strands = nv.paths || (nv.path ? [nv.path] : []);
+  if (!strands.length) fail(`神經 ${id} 缺少 path/paths`);
+  for (const st of strands) {
+    if (st.length < 2) fail(`神經 ${id} 的走行點少於 2 個`);
+    for (const pt of st) {
+      if (!Array.isArray(pt) || pt.length !== 3) fail(`神經 ${id} 走行點格式錯誤`);
+      else if (pt[0] < 0) fail(`神經 ${id} 走行點的 x 為負；一律定義在 +x 側`);
+    }
+  }
+  if (!(nv.r > 0)) fail(`神經 ${id} 缺少半徑 r`);
+  for (const f of ['name', 'latin', 'roots', 'course', 'supply', 'caution']) {
+    if (!nv[f]) fail(`神經 ${id} 缺少 ${f}`);
+  }
+  for (const m of nv.muscles) if (!MUSCLES[m]) fail(`神經 ${id} 參照到不存在的肌肉：${m}`);
+  for (const pt of nv.points) if (!ids.has(pt)) fail(`神經 ${id} 參照到不存在的穴位：${pt}`);
+  if (!nv.points.length) fail(`神經 ${id} 沒有對應的穴位`);
+}
+ok(`神經 ${Object.keys(NERVES).length} 條資料完整`);
+
+// ---------- 血管 ----------
+for (const [id, ve] of Object.entries(VESSELS)) {
+  if (!VESSEL_GROUPS[ve.group]) fail(`血管 ${id} 的分組不存在：${ve.group}`);
+  if (!VESSEL_KINDS[ve.kind]) fail(`血管 ${id} 的種類不存在：${ve.kind}`);
+  for (const f of ['name', 'latin', 'course', 'caution']) if (!ve[f]) fail(`血管 ${id} 缺少 ${f}`);
+  for (const pt of ve.points) if (!ids.has(pt)) fail(`血管 ${id} 參照到不存在的穴位：${pt}`);
+  if (!ve.points.length) fail(`血管 ${id} 沒有對應的穴位`);
+}
+ok(`血管 ${Object.keys(VESSELS).length} 條資料完整`);
+
 // ---------- 三層連結 ----------
 const orphan = Object.keys(MUSCLES).filter(id =>
   !POINTS.some(p => p.muscles.includes(id)) && !PNF_PATTERNS.some(p => p.muscles.includes(id)));
@@ -95,6 +129,16 @@ if (fs.existsSync(path.join(anatomyDir, 'manifest.json'))) {
   if (unknown.length) fail(`解剖資產有 data/muscles.js 沒有的肌肉 id：${unknown.join(', ')}`);
   const approx = Object.keys(MUSCLES).filter(k => !real.has(k));
   ok(`解剖資產：真實網格 ${real.size} 條、示意幾何 ${approx.length} 條（${approx.join('、')}）`);
+  // 血管的幾何全部來自資產，兩邊的 key 必須完全一致
+  if (!man.groups.vessels) fail('解剖資產缺少 vessels 群組');
+  else {
+    const asset = new Set(man.groups.vessels.parts.map(p => p.key));
+    const extra = [...asset].filter(k => !VESSELS[k]);
+    const lack = Object.keys(VESSELS).filter(k => !asset.has(k));
+    if (extra.length) fail(`解剖資產有 data/vessels.js 沒有的血管 id：${extra.join(', ')}`);
+    if (lack.length) fail(`data/vessels.js 有解剖資產缺少的血管 id：${lack.join(', ')}`);
+    if (!extra.length && !lack.length) ok(`血管網格 ${asset.size} 條與 data/vessels.js 完全對應`);
+  }
   for (const k of ['vertex', 'shoulder', 'elbow', 'wrist', 'hip', 'knee', 'ankle', 'cunBack', 'spinous']) {
     if (man.landmarks[k] === undefined) fail(`manifest 缺少 landmark：${k}`);
   }

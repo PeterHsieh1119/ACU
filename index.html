@@ -60,7 +60,7 @@
   #drawer-close { display: none; background: none; border: 0; color: var(--dim); font-size: 20px; cursor: pointer; padding: 2px 6px; }
 
   #tabs { display: flex; border-bottom: 1px solid var(--line); }
-  .tab { flex: 1; text-align: center; padding: 10px 0; font-size: 13.5px; cursor: pointer; color: var(--dim); border-bottom: 2px solid transparent; user-select: none; }
+  .tab { flex: 1; text-align: center; padding: 10px 0; font-size: 12.5px; cursor: pointer; color: var(--dim); border-bottom: 2px solid transparent; user-select: none; }
   .tab:hover { color: var(--text); }
   .tab.active { color: var(--text); border-bottom-color: var(--accent); background: rgba(79,195,247,.06); }
 
@@ -202,7 +202,11 @@
   .tag.pnf { background: #1e3a45; color: #9adcf7; cursor: pointer; }
   .tag.pt { background: #2b3324; color: #cbe6a5; cursor: pointer; }
   .tag.attr { background: var(--panel3); color: var(--dim); }
-  .tag.mus:hover, .tag.pnf:hover, .tag.pt:hover { filter: brightness(1.25); }
+  .tag.nrv { background: #3b3517; color: #f4de8c; cursor: pointer; }
+  .tag.ves.artery { background: #3d1f1c; color: #f6a49c; cursor: pointer; }
+  .tag.ves.vein { background: #1c2a3d; color: #a3c4ef; cursor: pointer; }
+  .tag.mus:hover, .tag.pnf:hover, .tag.pt:hover, .tag.nrv:hover, .tag.ves:hover { filter: brightness(1.25); }
+  .tag .dist { opacity: 0.62; font-size: 10px; margin-left: 4px; }
   .navrow { display: flex; gap: 6px; margin-top: 12px; }
   .navrow button { flex: 1; font-size: 11.5px; padding: 5px 0; border-radius: 6px; background: var(--panel2); border: 1px solid var(--line); color: var(--dim); cursor: pointer; }
   .navrow button:hover { color: var(--text); }
@@ -247,7 +251,7 @@
     <div id="brand">
       <div class="txt">
         <h1>ACU <span>針灸 × PNF</span></h1>
-        <p>經絡穴位 ↔ 肌肉 ↔ PNF 對角模式</p>
+        <p>經絡穴位 ↔ 肌肉 ↔ 血管神經 ↔ PNF</p>
       </div>
       <button id="drawer-close" aria-label="關閉選單">✕</button>
     </div>
@@ -255,6 +259,7 @@
       <div class="tab active" data-pane="pane-point">經絡穴位</div>
       <div class="tab" data-pane="pane-muscle">肌肉</div>
       <div class="tab" data-pane="pane-pnf">PNF</div>
+      <div class="tab" data-pane="pane-nv">血管神經</div>
     </div>
 
     <div id="pane-point" class="pane active">
@@ -283,6 +288,15 @@
     <div id="pane-pnf" class="pane">
       <button class="textbtn" id="pnfclear">清除模式選取</button>
       <div id="pnflist"></div>
+    </div>
+
+    <div id="pane-nv" class="pane">
+      <div class="field">
+        <input id="nsearch" type="text" placeholder="搜尋神經／血管：名稱、走行、注意事項…" autocomplete="off">
+        <button class="clear" id="nsearch-clear" aria-label="清除">✕</button>
+      </div>
+      <button class="textbtn" id="nvclear">清除選取</button>
+      <div id="nvlist"></div>
     </div>
 
     <div id="footer">
@@ -314,12 +328,14 @@
       <label><input type="checkbox" id="tg-routes" checked> 經絡線</label>
       <label><input type="checkbox" id="tg-labels"> 穴名標籤</label>
       <label><input type="checkbox" id="tg-allmus"> 顯示全部肌肉</label>
+      <label><input type="checkbox" id="tg-nerves"> 神經（示意）</label>
+      <label><input type="checkbox" id="tg-vessels"> 血管</label>
       <label><input type="checkbox" id="tg-bones"> 骨骼</label>
     </div>
 
     <div id="status" class="panelbox"></div>
 
-    <div id="hint">拖曳旋轉｜滾輪縮放｜點擊穴位或肌肉查看資訊<br>Esc 清除選取｜↑↓ 切換穴位</div>
+    <div id="hint">拖曳旋轉｜滾輪縮放｜點擊穴位、肌肉、神經或血管查看資訊<br>Esc 清除選取｜↑↓ 切換穴位</div>
 
     <div id="tooltip"></div>
     <div id="labels"></div>

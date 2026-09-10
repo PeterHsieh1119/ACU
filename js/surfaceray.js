@@ -8,7 +8,18 @@
 
 const EPS = 1e-9;
 
+// 同一份體表會被 retarget 與 makeSkinClamp 各要一次，分桶建表約 0.5 秒，共用即可
+const cache = new WeakMap();
+
 export function makeSurfaceRay(geometry, bucketCount = 160) {
+  const cached = cache.get(geometry);
+  if (cached && cached.bucketCount === bucketCount) return cached.fn;
+  const fn = buildSurfaceRay(geometry, bucketCount);
+  cache.set(geometry, { bucketCount, fn });
+  return fn;
+}
+
+function buildSurfaceRay(geometry, bucketCount) {
   const pos = geometry.attributes.position.array;
   const index = geometry.index.array;
   const triCount = index.length / 3;

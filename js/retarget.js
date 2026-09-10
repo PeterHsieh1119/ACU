@@ -189,6 +189,38 @@ export function makeRetarget(landmarks, skin, lift = 0.005) {
   };
 }
 
+/**
+ * 把一個點壓回體表以內。
+ * retarget 是「保留與體軸的絕對偏移量」，穴位本來就在皮膚上所以沒差，
+ * 但體內結構（神經走行點）就會出事：示意人體比真實模型瘦，同樣的偏移量
+ * 搬過來常常已經穿出皮膚——坐骨神經會跑到臀部後面幾公分的空中。
+ * 這裡沿「體軸 → 該點」的方向找體表交點，超出的就拉回體表內側。
+ * 只做「拉回來」不做「壓深」：射線可能先穿過胸廓再打到三角肌，
+ * 用比例去壓深會把肩部的神經吸到腋窩裡去，所以只留固定的皮下餘裕。
+ * @param {number} margin 拉回後距離體表多少公尺
+ */
+export function makeSkinClamp(landmarks, skin, margin = 0.010) {
+  const axis = makeAxisPoint(landmarks);
+  const intersect = makeSurfaceRay(skin);
+  const _P = new THREE.Vector3(), _D = new THREE.Vector3();
+  return function clamp(p) {
+    _P.set(p[0], p[1], p[2]);
+    const A = axis(_P);
+    _D.subVectors(_P, A);
+    const len = _D.length();
+    if (len < 1e-5) return p.slice();
+    _D.divideScalar(len);
+    const hits = intersect(A.x, A.y, A.z, _D.x, _D.y, _D.z, 0.30);
+    // 落在最內層交點以內就是體內，不用動
+    let surf = -1;
+    for (const h of hits) if (h <= len && h > surf) surf = h;
+    if (surf < 0) return p.slice();
+    const maxLen = Math.max(0.004, surf - margin);
+    if (len <= maxLen) return p.slice();
+    return [A.x + _D.x * maxLen, A.y + _D.y * maxLen, A.z + _D.z * maxLen];
+  };
+}
+
 /** 目標模型上「離某點最近的體軸位置」，鏡頭聚焦時用來決定從哪個方向看過去 */
 export function makeAxisPoint(landmarks) {
   const T = targetChains(landmarks);
