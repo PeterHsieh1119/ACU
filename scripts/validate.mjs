@@ -12,6 +12,7 @@ import { NERVES, NERVE_GROUPS } from '../data/nerves.js';
 import { VESSELS, VESSEL_GROUPS, VESSEL_KINDS } from '../data/vessels.js';
 import { LOCATE } from '../data/locate.js';
 import { BONE_CUN, FINGER_CUN, cunScale, landmarkOf } from '../data/cun.js';
+import { ORGANS, CONNECTIVES, ORGAN_GROUPS } from '../data/organs.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const problems = [];
@@ -143,6 +144,19 @@ for (const [key, s] of Object.entries(BONE_CUN)) {
 if (FINGER_CUN.length < 3) fail('指寸法資料不足');
 ok(`骨度分寸 ${Object.keys(BONE_CUN).length} 段、指寸法 ${FINGER_CUN.length} 種`);
 
+// ---------- 內臟與結締組織 ----------
+for (const [id, o] of Object.entries(ORGANS)) {
+  if (!ORGAN_GROUPS[o.group]) fail(`內臟 ${id} 的分區不存在：${o.group}`);
+  for (const f of ['name', 'latin', 'anatomy']) if (!o[f]) fail(`內臟 ${id} 缺少 ${f}`);
+  if (o.meridian && !MERIDIANS[o.meridian]) fail(`內臟 ${id} 的經絡不存在：${o.meridian}`);
+  for (const f of ['mu', 'shu']) if (o[f] && !ids.has(o[f])) fail(`內臟 ${id} 的${f === 'mu' ? '募穴' : '背俞穴'}不存在：${o[f]}`);
+}
+ok(`內臟 ${Object.keys(ORGANS).length} 件資料完整`);
+for (const [id, c] of Object.entries(CONNECTIVES)) {
+  for (const f of ['name', 'latin', 'anatomy', 'use']) if (!c[f]) fail(`結締組織 ${id} 缺少 ${f}`);
+}
+ok(`結締組織 ${Object.keys(CONNECTIVES).length} 件資料完整`);
+
 // ---------- 三層連結 ----------
 const orphan = Object.keys(MUSCLES).filter(id =>
   !POINTS.some(p => p.muscles.includes(id)) && !PNF_PATTERNS.some(p => p.muscles.includes(id)));
@@ -163,14 +177,16 @@ if (fs.existsSync(path.join(anatomyDir, 'manifest.json'))) {
   const approx = Object.keys(MUSCLES).filter(k => !real.has(k));
   ok(`解剖資產：真實網格 ${real.size} 條、示意幾何 ${approx.length} 條（${approx.join('、')}）`);
   // 血管的幾何全部來自資產，兩邊的 key 必須完全一致
-  if (!man.groups.vessels) fail('解剖資產缺少 vessels 群組');
-  else {
-    const asset = new Set(man.groups.vessels.parts.map(p => p.key));
-    const extra = [...asset].filter(k => !VESSELS[k]);
-    const lack = Object.keys(VESSELS).filter(k => !asset.has(k));
-    if (extra.length) fail(`解剖資產有 data/vessels.js 沒有的血管 id：${extra.join(', ')}`);
-    if (lack.length) fail(`data/vessels.js 有解剖資產缺少的血管 id：${lack.join(', ')}`);
-    if (!extra.length && !lack.length) ok(`血管網格 ${asset.size} 條與 data/vessels.js 完全對應`);
+  // 血管、內臟、結締組織的幾何全部來自資產，兩邊的 key 必須完全一致
+  for (const [g, data, label] of [['vessels', VESSELS, 'data/vessels.js'],
+    ['organs', ORGANS, 'data/organs.js 的 ORGANS'], ['connective', CONNECTIVES, 'data/organs.js 的 CONNECTIVES']]) {
+    if (!man.groups[g]) { fail(`解剖資產缺少 ${g} 群組`); continue; }
+    const asset = new Set(man.groups[g].parts.map(p => p.key));
+    const extra = [...asset].filter(k => !data[k]);
+    const lack = Object.keys(data).filter(k => !asset.has(k));
+    if (extra.length) fail(`解剖資產有 ${label} 沒有的 id：${extra.join(', ')}`);
+    if (lack.length) fail(`${label} 有解剖資產缺少的 id：${lack.join(', ')}`);
+    if (!extra.length && !lack.length) ok(`${g} 網格 ${asset.size} 件與 ${label} 完全對應`);
   }
   for (const k of ['vertex', 'shoulder', 'elbow', 'wrist', 'hip', 'knee', 'ankle', 'cunBack', 'spinous']) {
     if (man.landmarks[k] === undefined) fail(`manifest 缺少 landmark：${k}`);

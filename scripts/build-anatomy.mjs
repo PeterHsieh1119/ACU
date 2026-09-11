@@ -14,6 +14,8 @@
 //   data/anatomy/muscles.bin.gz  肌肉
 //   data/anatomy/bones.bin.gz    骨骼（延遲載入）
 //   data/anatomy/vessels.bin.gz  動脈與靜脈（延遲載入）
+//   data/anatomy/organs.bin.gz   內臟（延遲載入）
+//   data/anatomy/connective.bin.gz 軟骨、骨間膜、支持帶（延遲載入）
 //
 // 座標系與 ACU 相同：公尺、y 向上、+z 為前方、+x 為受檢者左側。
 // 只取單側（左）與正中結構，右側在執行時鏡射，資料量因此少一半。
@@ -164,6 +166,66 @@ const VESSEL_MAP = {
   tibial_v:         { kind: 'vein',   names: ['anterior tibial vein', 'posterior tibial vein'] },
 };
 
+// ---------------------------------------------------------------
+// 內臟與結締組織圖層
+//
+// both:true   左右不對稱、兩側都要取（支氣管樹右三葉左兩葉，鏡射會變成錯的解剖）
+// mirror:true 成對且左右對稱，只取左側、執行時鏡射（腎、腎上腺、輸尿管…）
+// 其餘一律 mirror:false：肝、胃、脾這些單一器官本來就偏一邊，鏡射會多長一個出來。
+//
+// ⚠ 來源資料沒有「肺實質」與「肝實質」的外殼網格：
+//    肺只有支氣管樹與肺血管，肝則是以九個肝靜脈分段（Couinaud 分段）構成體積。
+//    甲狀腺、心包、胸膜、大網膜同樣沒有收錄。
+// ---------------------------------------------------------------
+const ORGAN_MAP = {
+  heart: { names: ['wall of ventricle', 'wall of atrium', 'anterior leaflet of mitral valve',
+    'posterior leaflet of mitral valve', 'anterior leaflet of tricuspid valve',
+    'posterior leaflet of tricuspid valve', 'septal leaflet of tricuspid valve'], both: true },
+  liver: { names: ['hepatovenous segment i', 'hepatovenous segment ii', 'hepatovenous segment iii',
+    'hepatovenous segment iv', 'hepatovenous segment v', 'hepatovenous segment vi',
+    'hepatovenous segment vii', 'hepatovenous segment viii', 'hepatovenous segment ix'], both: true },
+  spleen: { names: ['spleen'] },
+  stomach: { names: ['stomach'] },
+  duodenum: { names: ['duodenum'] },
+  small_intestine: { names: ['proximal part of jejunum', 'middle part of jejunum', 'distal part of jejunum',
+    'proximal part of ileum', 'middle part of ileum', 'distal part of ileum'], both: true },
+  large_intestine: { names: ['ileocecal junction', 'ascending colon', 'transverse colon',
+    'descending colon', 'rectum', 'appendix'], both: true },
+  pancreas: { names: ['pancreas'] },
+  gallbladder: { names: ['gallbladder', 'cystic duct', 'common hepatic duct'], thin: true, both: true },
+  kidney: { names: ['kidney'], mirror: true },
+  ureter: { names: ['ureter'], thin: true, mirror: true },
+  bladder: { names: ['urinary bladder', 'urethra'], thin: true, both: true },
+  adrenal: { names: ['adrenal gland'], mirror: true },
+  esophagus: { names: ['esophagus'], thin: true },
+  trachea: { names: ['trachea', 'main bronchus', 'main bronchus proper'], thin: true, both: true },
+  bronchi: { names: ['apical segmental bronchial tree', 'anterior segmental bronchial tree',
+    'posterior segmental bronchial tree', 'superior segmental bronchial tree',
+    'lateral segmental bronchial tree', 'medial segmental bronchial tree',
+    'anterior basal segmental bronchial tree', 'lateral basal segmental bronchial tree',
+    'medial basal segmental bronchial tree', 'posterior basal segmental bronchial tree',
+    'superior lingular bronchial tree', 'inferior lingular bronchial tree'], thin: true, both: true },
+  diaphragm: { names: ['diaphragm'], both: true },
+  thymus: { names: ['lobe of thymus'], both: true },
+  tongue: { names: ['tongue'] },
+  salivary: { names: ['sublingual gland', 'submandibular gland'], both: true },
+  prostate: { names: ['prostate', 'seminal vesicle', 'deferent duct'], thin: true, both: true },
+  larynx: { names: ['thyroid cartilage', 'cricoid cartilage', 'epiglottis'], both: true },
+};
+
+// 結締組織：來源只收錄了這些，膝十字韌帶、脊椎韌帶、肩關節囊等都沒有
+const CONNECTIVE_MAP = {
+  costal_cartilage: { names: ['first costal cartilage', 'second costal cartilage', 'third costal cartilage',
+    'fourth costal cartilage', 'fifth costal cartilage', 'sixth costal cartilage', 'seventh costal cartilage'],
+    mirror: true },
+  interosseous_forearm: { names: ['interosseous membrane of forearm'], mirror: true },
+  interosseous_leg: { names: ['interosseous membrane of leg'], mirror: true },
+  flexor_retinaculum: { names: ['flexor retinaculum of wrist'], mirror: true },
+  long_plantar_ligament: { names: ['long plantar ligament'], mirror: true },
+  thyrohyoid: { names: ['thyrohyoid membrane', 'median thyrohyoid ligament', 'lateral thyrohyoid ligament',
+    'stylohyoid ligament'], both: true },
+};
+
 // 骨骼圖層：略過牙齒、牙齦、聽小骨等對體表定位沒有幫助的細碎結構
 const BONE_SKIP = /gingiva|tooth|teeth|incisor|canine|premolar|molar|malleus|incus|stapes|hyoid bone of|nail/i;
 
@@ -196,6 +258,8 @@ for (const p of atlas.parts) {
   byStripped.get(k).push(p);
 }
 const partsNamed = want => (byStripped.get(want) || []).filter(p => !isRight(p));
+/** 兩側都取：左右不對稱的結構（支氣管樹、肝段、腸道）鏡射會做出錯的解剖 */
+const partsNamedBoth = want => byStripped.get(want) || [];
 
 // ---------------------------------------------------------------
 // 幾何處理
@@ -273,7 +337,7 @@ function compact(pos, idx) {
 // ---------------------------------------------------------------
 // 收集要輸出的部位
 // ---------------------------------------------------------------
-const groups = { skin: [], muscles: [], bones: [], vessels: [] };
+const groups = { skin: [], muscles: [], bones: [], vessels: [], organs: [], connective: [] };
 const missing = [];
 
 const skinParts = partsNamed('skin');
@@ -298,6 +362,26 @@ for (const [key, v] of Object.entries(VESSEL_MAP)) {
     kind: v.kind, forceMirror: v.midline ? false : null,
   });
 }
+
+// 內臟與結締組織
+const missingOrgans = [];
+for (const [g, map, ratio] of [['organs', ORGAN_MAP, 0.4], ['connective', CONNECTIVE_MAP, 0.5]]) {
+  for (const [key, spec] of Object.entries(map)) {
+    const pick = spec.both ? partsNamedBoth : partsNamed;
+    const parts = spec.names.flatMap(pick);
+    if (!parts.length) { missingOrgans.push(key); continue; }
+    groups[g].push({
+      key, name: spec.names[0], parts,
+      // 管狀的器官（輸尿管、食道、膽管、輸精管）管徑只有幾公釐，
+      // 用臟器的誤差上限去簡化會把整條管子收成一顆紡錘。
+      ratio: spec.thin ? 0.7 : ratio,
+      error: spec.thin ? 0.0012 : 0.004,
+      forceMirror: spec.mirror ? true : false,
+    });
+  }
+}
+console.log('內臟 %d 件、結締組織 %d 件，缺 %d：%s',
+  groups.organs.length, groups.connective.length, missingOrgans.length, missingOrgans.join(', ') || '無');
 
 // 來源把脛前肌、提肩胛肌等歸在 skeletal，得把已經當肌肉用掉的部位排除，
 // 骨骼層才不會混進肌肉。

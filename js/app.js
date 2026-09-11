@@ -6,6 +6,7 @@ import { PNF_PATTERNS, PNF_REGIONS } from '../data/pnf.js';
 import { NERVES, NERVE_GROUPS } from '../data/nerves.js';
 import { VESSELS, VESSEL_GROUPS, VESSEL_KINDS } from '../data/vessels.js';
 import { LOCATE } from '../data/locate.js';
+import { ORGANS, CONNECTIVES, ORGAN_GROUPS } from '../data/organs.js';
 import { BONE_CUN, FINGER_CUN, cunScale } from '../data/cun.js';
 import { buildBody, makeSnapper, bodyAxisPoint } from './body.js';
 import { loadAnatomy, mirrorGeometry } from './anatomy.js';
@@ -170,7 +171,9 @@ function surfacePolyline(strand) {
     const a = anchors[i], b = anchors[i + 1];
     push(a);
     const d = Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]);
-    const n = Math.min(14, Math.floor(d / 0.035));
+    // 細分間距 2 公分：補間點越密，貼合體表後的折線越接近真正沿體表走的曲線。
+    // 不做額外的平滑——補間點一旦離開體表再投影，在指縫、踝這種地方會被拉到別的面上。
+    const n = Math.min(22, Math.floor(d / 0.02));
     for (let k = 1; k <= n; k++) {
       const t = k / (n + 1);
       push(placePoint([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t], { maxShift: 0.09 }).p);
@@ -183,6 +186,7 @@ function surfacePolyline(strand) {
 // ============================================================
 // 經絡線
 // ============================================================
+const ROUTE_R = 0.0017;   // 經絡線半徑：比穴位標記細一個量級，才不會蓋住體表細節
 const routeGroups = {};
 for (const [key, strands] of Object.entries(ROUTES)) {
   const g = new THREE.Group();
@@ -197,7 +201,7 @@ for (const [key, strands] of Object.entries(ROUTES)) {
     const steps = Math.min(420, Math.max(48, pts.length * 3));
     const sides = (key === 'REN' || key === 'DU') ? [pts] : [pts, pts.map(p => [-p[0], p[1], p[2]])];
     for (const side of sides) {
-      const mesh = new THREE.Mesh(tube(side, { r: 0.0034, taper: [1, 1], radial: 6, tension: 0.2, steps }), mat);
+      const mesh = new THREE.Mesh(tube(side, { r: ROUTE_R, taper: [1, 1], radial: 6, tension: 0.2, steps }), mat);
       mesh.renderOrder = 3;
       g.add(mesh);
     }
@@ -378,13 +382,86 @@ function renderNerves() {
   const rel = state.sel.kind === 'nerve' ? null : nervesRelatedToSelection();
   for (const [id, rec] of Object.entries(nerveMeshes)) {
     const on = id === sel;
-    const hl = !on && rel && rel.has(id);
-    const show = state.showNerves || on || hl;
+    // 一律轉成真正的布林值：three.js 判斷的是 `object.visible === false`，
+    // 指派到 null（`rel && rel.has(id)` 在 rel 為 null 時的結果）會照樣畫出來。
+    const hl = Boolean(!on && rel && rel.has(id));
+    const show = Boolean(state.showNerves || on || hl);
     for (const m of rec.meshes) m.visible = show;
     if (!show) continue;
     rec.mat.color.setHex(on ? NRV_SEL : hl ? NRV_HL : NRV_BASE);
     rec.mat.opacity = (on || hl) ? 1 : (state.showNerves ? 0.55 : 0.9);
   }
+}
+
+// ============================================================
+// 延遲載入的網格圖層（血管、內臟、結締組織共用同一套流程）
+// ============================================================
+// 三層的差別只在資料檔、顏色與 userData 的 key，其餘（下載、鏡射、點雲、
+// 高亮、顯示規則）完全一樣，所以抽成一個工廠。
+function makeMeshLayer({ name, loader, label, userKey, colorOf, emissiveOf, renderOrder, cloudStep = 18 }) {
+  const group = new THREE.Group();
+  scene.add(group);
+  const recs = {};
+  const layer = {
+    group, recs, name,
+    state: anatomy ? 'idle' : 'none',   // idle | loading | ready | failed | none
+    visible: false,
+    async ensure() {
+      if (layer.state !== 'idle') return layer.state === 'ready';
+      layer.state = 'loading';
+      setStatus(`${label}載入中…`);
+      try {
+        const parts = await loader((got, total) => setStatus(`${label}載入中…${pct(got, total)}`));
+        for (const part of parts) {
+          const mat = new THREE.MeshStandardMaterial({
+            color: colorOf(part), emissive: emissiveOf(part), roughness: 0.52, metalness: 0.03,
+            transparent: true, opacity: 0.95, depthWrite: false,
+          });
+          const geos = part.mirror ? [part.geometry, mirrorGeometry(part.geometry)] : [part.geometry];
+          const meshes = geos.map(geo => {
+            const mesh = new THREE.Mesh(geo, mat);
+            mesh.visible = false;
+            mesh.userData[userKey] = part.key;
+            mesh.renderOrder = renderOrder;
+            group.add(mesh);
+            geo.computeBoundingSphere();
+            return mesh;
+          });
+          const cloud = [];
+          for (const m of meshes) {
+            const a = m.geometry.attributes.position.array;
+            for (let i = 0; i < a.length; i += cloudStep) cloud.push(a[i], a[i + 1], a[i + 2]);
+          }
+          recs[part.key] = {
+            meshes, mat, part,
+            center: meshes[0].geometry.boundingSphere.center.clone(),
+            radius: meshes[0].geometry.boundingSphere.radius,
+            cloud: new Float32Array(cloud),
+          };
+        }
+        layer.state = 'ready';
+        setStatus('');
+        return true;
+      } catch (err) {
+        console.warn(`[ACU] ${label}載入失敗：`, err.message);
+        layer.state = 'failed';
+        setStatus('');
+        return false;
+      }
+    },
+    render(selId, relSet) {
+      for (const [id, rec] of Object.entries(recs)) {
+        const on = id === selId;
+        const hl = Boolean(!on && relSet && relSet.has(id));
+        const show = Boolean(layer.visible || on || hl);
+        for (const m of rec.meshes) m.visible = show;
+        if (!show) continue;
+        rec.mat.color.setHex(on ? 0xffffff : hl ? 0xffd166 : colorOf(rec.part));
+        rec.mat.opacity = (on || hl) ? 1 : (layer.visible ? 0.62 : 0.9);
+      }
+    },
+  };
+  return layer;
 }
 
 // ============================================================
@@ -450,14 +527,33 @@ function renderVessels() {
   const rel = state.sel.kind === 'vessel' ? null : vesselsRelatedToSelection();
   for (const [id, rec] of Object.entries(vesselMeshes)) {
     const on = id === sel;
-    const hl = !on && rel && rel.has(id);
-    const show = state.showVessels || on || hl;
+    const hl = Boolean(!on && rel && rel.has(id));
+    const show = Boolean(state.showVessels || on || hl);
     for (const m of rec.meshes) m.visible = show;
     if (!show) continue;
     rec.mat.color.setHex(on ? VES_SEL : hl ? VES_HL : vesselBaseColor(rec.kind));
     rec.mat.opacity = (on || hl) ? 1 : (state.showVessels ? 0.6 : 0.9);
   }
 }
+
+// ============================================================
+// 內臟與結締組織
+// ============================================================
+const ORGAN_COLOR = {
+  heart: 0xd0554e, liver: 0x9c5f4a, gallbladder: 0x6f8f4a, spleen: 0x8f5570, stomach: 0xc98a5e,
+  duodenum: 0xc09060, small_intestine: 0xcf9a72, large_intestine: 0xbe8a63, pancreas: 0xc9a96a,
+  kidney: 0x8f6a52, ureter: 0xa8b0b8, bladder: 0xb8c0c8, prostate: 0x9a8090, adrenal: 0xd2b46a,
+  diaphragm: 0xcf7f78, trachea: 0xa9bec9, bronchi: 0x9fb6c4, esophagus: 0xbfa48c, thymus: 0xd4b8a0,
+  larynx: 0xc3cbd2, tongue: 0xcf7e80, salivary: 0xc9a9a0,
+};
+const organLayer = makeMeshLayer({
+  name: 'organs', loader: p => anatomy.loadOrgans(p), label: '內臟網格', userKey: 'organId',
+  colorOf: part => ORGAN_COLOR[part.key] || 0xc08878, emissiveOf: () => 0x2a1310, renderOrder: 0.7,
+});
+const connectiveLayer = makeMeshLayer({
+  name: 'connective', loader: p => anatomy.loadConnective(p), label: '軟骨與韌帶', userKey: 'connId',
+  colorOf: () => 0xdfe4e8, emissiveOf: () => 0x1a2026, renderOrder: 0.65,
+});
 
 // ============================================================
 // 幾何鄰近查詢
@@ -518,6 +614,12 @@ for (const [id, nv] of Object.entries(NERVES)) {
 for (const [id, ve] of Object.entries(VESSELS)) {
   for (const p of ve.points) (vesselsOfPoint[p] ||= []).push(id);
 }
+const organsOfMeridian = {};
+const organsOfPoint = {};
+for (const [id, o] of Object.entries(ORGANS)) {
+  if (o.meridian) (organsOfMeridian[o.meridian] ||= []).push(id);
+  for (const f of ['mu', 'shu']) if (o[f]) (organsOfPoint[o[f]] ||= []).push(id);
+}
 const nervesOfPattern = pat => [...new Set(pat.muscles.flatMap(m => nervesOfMuscle[m] || []))];
 
 /** 穴位的鄰近結構＝人工整理的組合 ∪ 幾何 3 公分內的；回傳已排序、標好距離的清單 */
@@ -557,6 +659,8 @@ const state = {
   showAllMuscles: false,
   showNerves: false,
   showVessels: false,
+  showOrgans: false,
+  showConnective: false,
 };
 
 const pointsOfPattern = pat => POINTS.filter(pt => pt.muscles.some(m => pat.muscles.includes(m)));
@@ -612,6 +716,14 @@ function relatedSets() {
   if (kind === 'vessel') {
     return { points: new Set(VESSELS[id].points), muscles: [], color: MUS_HL };
   }
+  if (kind === 'organ') {
+    const o = ORGANS[id];
+    const pts = new Set([o.mu, o.shu].filter(Boolean));
+    // 該臟腑所屬經絡的全部穴位也一起點亮
+    if (o.meridian) for (const p of POINTS) if (p.meridian === o.meridian) pts.add(p.id);
+    return { points: pts, muscles: [], color: MUS_HL };
+  }
+  if (kind === 'connective') return { points: new Set(), muscles: [], color: MUS_HL };
   return { points: new Set(), muscles: [], color: MUS_HL };
 }
 
@@ -631,6 +743,9 @@ function applyHighlights() {
   renderMuscles(rel.muscles, rel.color);
   renderNerves();
   renderVessels();
+  organLayer.render(state.sel.kind === 'organ' ? state.sel.id : null,
+    state.sel.kind === 'point' ? new Set(organsOfPoint[state.sel.id] || []) : null);
+  connectiveLayer.render(state.sel.kind === 'connective' ? state.sel.id : null, null);
 
   for (const [k, g] of Object.entries(routeGroups)) g.visible = state.showRoutes && state.meriVisible[k];
   labelsDirty = true;
@@ -689,6 +804,9 @@ function bindInfoTags() {
   infoBody.querySelectorAll('[data-pt]').forEach(el => el.onclick = () => selectPoint(el.dataset.pt));
   infoBody.querySelectorAll('[data-nrv]').forEach(el => el.onclick = () => selectNerve(el.dataset.nrv));
   infoBody.querySelectorAll('[data-ves]').forEach(el => el.onclick = () => selectVessel(el.dataset.ves));
+  infoBody.querySelectorAll('[data-org]').forEach(el => el.onclick = () => selectOrgan(el.dataset.org));
+  infoBody.querySelectorAll('[data-conn]').forEach(el => el.onclick = () => selectConnective(el.dataset.conn));
+  infoBody.querySelectorAll('[data-meri]').forEach(el => el.onclick = () => showOnlyMeridian(el.dataset.meri));
 }
 
 /** 「骨度依據」那一列：本穴用哪一把尺、量到第幾寸、在本模型上等於幾公分 */
@@ -739,6 +857,8 @@ function showPointInfo(pt) {
       <dt>刺法參考</dt><dd>${esc(pt.depth)}</dd>
       <dt>下方／鄰近肌肉</dt><dd>${musTags(pt.muscles)}</dd>
       <dt>鄰近神經</dt><dd>${nrvTags(nb.nerves)}</dd>
+      ${(organsOfPoint[pt.id] || []).length ? `<dt>相關臟腑</dt><dd>${(organsOfPoint[pt.id] || []).map(o =>
+        `<span class="tag org" data-org="${o}">${esc(ORGANS[o].name)}</span>`).join('')}</dd>` : ''}
       <dt>鄰近血管</dt><dd>${vesTags(nb.vessels, vesselAssets === 'ready' ? '3 公分內沒有列入的主要血管' : '打開「血管」圖層後才會計算')}</dd>
       <dt>相關 PNF 模式（共用肌肉）</dt><dd>${pnfTags(patternsOfPoint(pt))}</dd>
     </dl>
@@ -841,6 +961,45 @@ function showVesselInfo(id) {
   bindInfoTags();
 }
 
+function showOrganInfo(id) {
+  const o = ORGANS[id];
+  const mer = o.meridian && MERIDIANS[o.meridian];
+  const pair = [['募穴', o.mu], ['背俞穴', o.shu]].filter(([, v]) => v);
+  infoBody.innerHTML = `
+    <h2>${esc(o.name)}</h2>
+    <div class="sub" style="color:${hex(ORGAN_COLOR[id] || 0xc08878)}">${esc(o.latin)} · ${ORGAN_GROUPS[o.group] || ''}${
+      mer ? ` · <span style="color:${hex(mer.color)}">${esc(mer.name)}</span>` : ''}</div>
+    <dl>
+      <dt>解剖</dt><dd>${esc(o.anatomy)}</dd>
+      ${o.tcm ? `<dt>中醫臟象</dt><dd>${esc(o.tcm)}</dd>` : ''}
+      ${pair.length ? `<dt>臟腑配穴</dt><dd>${pair.map(([k, v]) =>
+        `${k}：<span class="tag pt" data-pt="${v}">${esc(pointById[v].name)}</span>`).join('　')}</dd>` : ''}
+      ${mer ? `<dt>所屬經絡</dt><dd><span class="tag pt" data-meri="${o.meridian}" style="background:#2b3324;color:#cbe6a5;cursor:pointer">${esc(mer.name)}（${POINTS.filter(p => p.meridian === o.meridian).length} 穴）</span></dd>` : ''}
+      ${o.caution ? `<dt>針刺注意</dt><dd>${esc(o.caution)}</dd>` : ''}
+    </dl>
+    <div class="warn">幾何取自 BodyParts3D 解剖模型（CC BY 4.0），為教學用簡化網格。
+      中醫的臟腑是功能系統，與這裡顯示的解剖器官不能直接畫等號。</div>`;
+  infoEl.classList.add('show');
+  infoEl.scrollTop = 0;
+  bindInfoTags();
+}
+
+function showConnectiveInfo(id) {
+  const c = CONNECTIVES[id];
+  infoBody.innerHTML = `
+    <h2>${esc(c.name)}</h2>
+    <div class="sub" style="color:var(--dim)">${esc(c.latin)}</div>
+    <dl>
+      <dt>解剖</dt><dd>${esc(c.anatomy)}</dd>
+      <dt>取穴上的用處</dt><dd>${esc(c.use)}</dd>
+    </dl>
+    <div class="warn">來源解剖資料只收錄了肋軟骨、喉軟骨、骨間膜、支持帶等少數結締組織；
+      膝十字韌帶、脊椎韌帶、關節囊等並未包含。</div>`;
+  infoEl.classList.add('show');
+  infoEl.scrollTop = 0;
+  bindInfoTags();
+}
+
 // ============================================================
 // 選取
 // ============================================================
@@ -917,6 +1076,50 @@ function selectVessel(id, opts = {}) {
   }
   writeHash();
   closeDrawerOnMobile();
+}
+
+function selectOrgan(id, opts = {}) {
+  if (!ORGANS[id]) return;
+  state.sel = { kind: 'organ', id };
+  switchTab('pane-nv');
+  syncSidebarSelection();
+  applyHighlights();
+  showOrganInfo(id);
+  focusLayerItem(organLayer, id, opts);
+  writeHash();
+  closeDrawerOnMobile();
+}
+
+function selectConnective(id, opts = {}) {
+  if (!CONNECTIVES[id]) return;
+  state.sel = { kind: 'connective', id };
+  switchTab('pane-nv');
+  syncSidebarSelection();
+  applyHighlights();
+  showConnectiveInfo(id);
+  focusLayerItem(connectiveLayer, id, opts);
+  writeHash();
+  closeDrawerOnMobile();
+}
+
+/** 網格還沒下載時先開資訊面板，到了再補畫與補聚焦 */
+function focusLayerItem(layer, id, opts = {}) {
+  const go = () => {
+    const rec = layer.recs[id];
+    if (rec && opts.focus !== false) focusOnVector(rec.center.clone(), Math.max(0.55, rec.radius * 2.4));
+  };
+  if (layer.state === 'idle') {
+    layer.ensure().then(ok => { if (!ok) return; applyHighlights(); if (state.sel.id === id) go(); });
+  } else go();
+}
+
+/** 從器官面板點經絡：只留這一條經 */
+function showOnlyMeridian(key) {
+  for (const k of Object.keys(MERIDIANS)) toggleMeridian(k, k === key);
+  state.showRoutes = true;
+  $('tg-routes').checked = true;
+  switchTab('pane-point');
+  applyHighlights();
 }
 
 function muscleCenter(id) {
@@ -1218,12 +1421,53 @@ function renderNerveVesselList() {
     nvlist.appendChild(d);
   }
 
-  if (!total) nvlist.innerHTML = '<div class="empty">沒有符合條件的神經或血管</div>';
+  const organParts = {};
+  for (const [id, o] of Object.entries(ORGANS)) {
+    if (!hit(o.name, o.latin, o.anatomy, o.tcm || '', o.caution || '')) continue;
+    (organParts[o.group] ||= []).push([id, o]);
+  }
+  for (const [gk, items] of Object.entries(organParts)) {
+    total += items.length;
+    const d = document.createElement('details');
+    d.className = 'group';
+    d.open = true;
+    d.innerHTML = `<summary>內臟 · ${ORGAN_GROUPS[gk] || gk}<span class="sp" style="color:var(--dim2);font-size:10.5px">${items.length}</span></summary>`;
+    for (const [id, o] of items) {
+      const row = document.createElement('div');
+      row.className = 'prow' + (state.sel.kind === 'organ' && state.sel.id === id ? ' sel' : '');
+      row.dataset.org = id;
+      row.innerHTML = `<span class="mdot" style="background:${hex(ORGAN_COLOR[id] || 0xc08878)}"></span><span class="nm">${esc(o.name)}</span>
+        <span class="mer" style="color:var(--dim2);font-size:10px">${o.meridian ? esc(MERIDIANS[o.meridian].short) : ''}</span>`;
+      row.onclick = () => selectOrgan(id);
+      d.appendChild(row);
+    }
+    nvlist.appendChild(d);
+  }
+
+  const conn = Object.entries(CONNECTIVES).filter(([, c]) => hit(c.name, c.latin, c.anatomy, c.use));
+  if (conn.length) {
+    total += conn.length;
+    const d = document.createElement('details');
+    d.className = 'group';
+    d.open = true;
+    d.innerHTML = `<summary>軟骨與韌帶<span class="sp" style="color:var(--dim2);font-size:10.5px">${conn.length}</span></summary>`;
+    for (const [id, c] of conn) {
+      const row = document.createElement('div');
+      row.className = 'prow' + (state.sel.kind === 'connective' && state.sel.id === id ? ' sel' : '');
+      row.dataset.conn = id;
+      row.innerHTML = `<span class="mdot" style="background:#dfe4e8"></span><span class="nm">${esc(c.name)}</span>`;
+      row.onclick = () => selectConnective(id);
+      d.appendChild(row);
+    }
+    nvlist.appendChild(d);
+  }
+
+  if (!total) nvlist.innerHTML = '<div class="empty">沒有符合條件的項目</div>';
 }
 const nsearchEl = $('nsearch');
 nsearchEl.addEventListener('input', () => { state.nquery = nsearchEl.value.trim().toLowerCase(); renderNerveVesselList(); });
 $('nsearch-clear').onclick = () => { nsearchEl.value = ''; state.nquery = ''; renderNerveVesselList(); };
-$('nvclear').onclick = () => { if (state.sel.kind === 'nerve' || state.sel.kind === 'vessel') closeInfo(); };
+$('nvclear').onclick = () => { if (['nerve', 'vessel', 'organ', 'connective'].includes(state.sel.kind)) closeInfo(); };
 
 function syncSidebarSelection() {
   document.querySelectorAll('.prow[data-pt]').forEach(r => r.classList.toggle('sel', state.sel.kind === 'point' && r.dataset.pt === state.sel.id));
@@ -1231,6 +1475,8 @@ function syncSidebarSelection() {
   document.querySelectorAll('.pnfbtn').forEach(b => b.classList.toggle('sel', state.sel.kind === 'pattern' && b.dataset.pat === state.sel.id));
   document.querySelectorAll('.prow[data-nrv]').forEach(r => r.classList.toggle('sel', state.sel.kind === 'nerve' && r.dataset.nrv === state.sel.id));
   document.querySelectorAll('.prow[data-ves]').forEach(r => r.classList.toggle('sel', state.sel.kind === 'vessel' && r.dataset.ves === state.sel.id));
+  document.querySelectorAll('.prow[data-org]').forEach(r => r.classList.toggle('sel', state.sel.kind === 'organ' && r.dataset.org === state.sel.id));
+  document.querySelectorAll('.prow[data-conn]').forEach(r => r.classList.toggle('sel', state.sel.kind === 'connective' && r.dataset.conn === state.sel.id));
   const row = ptlist.querySelector('.prow.sel');
   if (row) row.scrollIntoView({ block: 'nearest' });
 }
@@ -1262,6 +1508,25 @@ vesselToggle.addEventListener('change', async e => {
   if (!ok) { vesselToggle.checked = false; state.showVessels = false; }
   applyHighlights();
 });
+
+// 內臟與結締組織：同樣是打開才下載
+function bindLayerToggle(inputId, layer, setState) {
+  const el = $(inputId);
+  if (!anatomy) { el.disabled = true; el.parentElement.style.opacity = 0.4; return; }
+  el.addEventListener('change', async e => {
+    layer.visible = e.target.checked;
+    setState(e.target.checked);
+    applyHighlights();
+    if (!layer.visible || layer.state !== 'idle') return;
+    el.parentElement.style.opacity = 0.55;
+    const ok = await layer.ensure();
+    el.parentElement.style.opacity = '';
+    if (!ok) { el.checked = false; layer.visible = false; setState(false); }
+    applyHighlights();
+  });
+}
+bindLayerToggle('tg-organs', organLayer, v => { state.showOrgans = v; });
+bindLayerToggle('tg-connective', connectiveLayer, v => { state.showConnective = v; });
 
 // 骨骼是額外的一包資料，第一次打開才下載
 let bonesGroup = null, bonesLoading = false;
@@ -1356,7 +1621,7 @@ function pick(clientX, clientY, radiusPx = 15) {
   if (i >= 0) return { kind: 'point', id: instances[i].pointId };
 
   const targets = [];
-  for (const g of [muscleGroup, nerveGroup, vesselGroup]) {
+  for (const g of [muscleGroup, nerveGroup, vesselGroup, organLayer.group, connectiveLayer.group]) {
     for (const m of g.children) if (m.visible) targets.push(m);
   }
   if (!targets.length) return null;
@@ -1369,6 +1634,8 @@ function pick(clientX, clientY, radiusPx = 15) {
   const { userData: u } = hits[0].object;
   if (u.nerveId) return { kind: 'nerve', id: u.nerveId };
   if (u.vesselId) return { kind: 'vessel', id: u.vesselId };
+  if (u.organId) return { kind: 'organ', id: u.organId };
+  if (u.connId) return { kind: 'connective', id: u.connId };
   return { kind: 'muscle', id: u.muscleId };
 }
 
@@ -1382,6 +1649,8 @@ dom.addEventListener('pointerup', e => {
   if (hit.kind === 'point') selectPoint(hit.id, { focus: false });
   else if (hit.kind === 'nerve') selectNerve(hit.id, { focus: false });
   else if (hit.kind === 'vessel') selectVessel(hit.id, { focus: false });
+  else if (hit.kind === 'organ') selectOrgan(hit.id, { focus: false });
+  else if (hit.kind === 'connective') selectConnective(hit.id, { focus: false });
   else selectMuscle(hit.id, { focus: false });
 });
 let hoverPending = null;
@@ -1403,7 +1672,9 @@ function doHover(cx, cy) {
     const meta = hit.kind === 'point' ? [pointById[hit.id].name, pointById[hit.id].code]
       : hit.kind === 'nerve' ? [NERVES[hit.id].name, NERVES[hit.id].roots]
         : hit.kind === 'vessel' ? [VESSELS[hit.id].name, VESSEL_KINDS[VESSELS[hit.id].kind].name]
-          : [MUSCLES[hit.id].name, MUSCLES[hit.id].latin];
+        : hit.kind === 'organ' ? [ORGANS[hit.id].name, ORGANS[hit.id].latin]
+          : hit.kind === 'connective' ? [CONNECTIVES[hit.id].name, CONNECTIVES[hit.id].latin]
+            : [MUSCLES[hit.id].name, MUSCLES[hit.id].latin];
     tooltip.innerHTML = `${esc(meta[0])}<span class="sub">${esc(meta[1])}</span>`;
   }
   const rect = dom.getBoundingClientRect();
@@ -1495,11 +1766,12 @@ function writeHash() {
   const { kind, id } = state.sel;
   const h = kind === 'point' ? `#p=${id}` : kind === 'muscle' ? `#m=${id}`
     : kind === 'pattern' ? `#f=${id}` : kind === 'nerve' ? `#n=${id}`
-      : kind === 'vessel' ? `#v=${id}` : '';
+      : kind === 'vessel' ? `#v=${id}` : kind === 'organ' ? `#o=${id}`
+        : kind === 'connective' ? `#c=${id}` : '';
   history.replaceState(null, '', h || location.pathname + location.search);
 }
 function readHash() {
-  const m = location.hash.match(/^#(p|m|f|n|v)=(.+)$/);
+  const m = location.hash.match(/^#(p|m|f|n|v|o|c)=(.+)$/);
   if (!m) return false;
   const id = decodeURIComponent(m[2]);
   if (m[1] === 'p' && pointById[id]) { selectPoint(id); return true; }
@@ -1507,6 +1779,8 @@ function readHash() {
   if (m[1] === 'f' && patternById[id]) { selectPattern(id); return true; }
   if (m[1] === 'n' && NERVES[id]) { selectNerve(id); return true; }
   if (m[1] === 'v' && VESSELS[id]) { selectVessel(id); return true; }
+  if (m[1] === 'o' && ORGANS[id]) { selectOrgan(id); return true; }
+  if (m[1] === 'c' && CONNECTIVES[id]) { selectConnective(id); return true; }
   return false;
 }
 window.addEventListener('hashchange', readHash);

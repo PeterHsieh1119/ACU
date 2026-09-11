@@ -115,5 +115,7 @@ export async function loadAnatomy(onProgress) {
     loadMuscles: p => loadGroup(manifest, 'muscles', p).then(list => new Map(list.map(m => [m.key, m]))),
     loadBones: p => loadGroup(manifest, 'bones', p),
     loadVessels: p => loadGroup(manifest, 'vessels', p),
+    loadOrgans: p => loadGroup(manifest, 'organs', p),
+    loadConnective: p => loadGroup(manifest, 'connective', p),
   };
 }
